@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: llm-envoy-config
+  name: envoy-config
 data:
   envoy.yaml: |
     static_resources:
@@ -30,7 +30,23 @@ data:
                                 cluster_header: "target_pod"
                                 timeout: 1000s  # Increase route timeout
                     http_filters:
+                      - name: envoy.filters.http.ext_proc
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                          failure_mode_allow: false
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: ext_proc_cluster
+                          processing_mode:
+                            request_header_mode: "SEND"
+                            response_header_mode: "SEND"
+                            request_body_mode: "BUFFERED"
+                            response_body_mode: "NONE"
+                            request_trailer_mode: "SKIP"
+                            response_trailer_mode: "SKIP"
                       - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
       clusters:
         - name: vllm-0
           connect_timeout: 1000s
@@ -71,6 +87,20 @@ data:
                         socket_address:
                           address: vllm-2.vllm-lora.default.svc.cluster.local
                           port_value: 8000
+        - name: ext_proc_cluster
+          connect_timeout: 1000s
+          type: STATIC
+          http2_protocol_options: {}
+          lb_policy: ROUND_ROBIN
+          load_assignment:
+            cluster_name: ext_proc_cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: 34.126.143.222
+                          port_value: 50051
     # Enable detailed logging
     layered_runtime:
       layers:
