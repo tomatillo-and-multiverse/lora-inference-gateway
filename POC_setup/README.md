@@ -52,9 +52,10 @@ Apply the configuration and deployment files for the gRPC server:
 
 ```sh
 kubectl apply -f /mnt/data/grpc_server_go.yaml
-kubectl apply -f /mnt/data/grpc_envoy_service.yaml
-kubectl apply -f /mnt/data/grpc_envoy_deployment.yaml
 kubectl apply -f /mnt/data/grpc_envoy_configmap.yaml
+kubectl apply -f /mnt/data/grpc_envoy_deployment.yaml
+kubectl apply -f /mnt/data/grpc_envoy_service.yaml
+
 ```
 
 ### 4. Set Up Gateway and Routes
