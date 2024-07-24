@@ -613,7 +613,7 @@ func (s *server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 			}
 			fmt.Printf("Selected target pod: %s\n", targetPod)
 
-			if !s.isFairRequest(lora_adapter_requested) {
+			if !s.loraCache.IsFairRequest(lora_adapter_requested) {
 				resp = &extProcPb.ProcessingResponse{
 					Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 						ImmediateResponse: &extProcPb.ImmediateResponse{
@@ -706,19 +706,7 @@ func (s *server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 			log.Printf("Model Value: %v", model)
 			log.Printf("Total Tokens: %v", totalTokens)
 			if "model" != "" {
-				tokenData := TokenRepsonseData{Time: current, TokenCount: totalTokens}
-				if v, ok := s.loraCache.AdapterMap.Load(model); ok {
-					val := v.([]TokenRepsonseData)
-					newArr := []TokenRepsonseData{}
-					for _, entry := range val {
-						if entry.Time >= int64(current-TTL) {
-							newArr = append(newArr, entry)
-						}
-					}
-					s.loraCache.AdapterMap.Store(model, append(newArr, tokenData))
-				} else {
-					s.loraCache.AdapterMap.Store(model, []TokenRepsonseData{tokenData})
-				}
+				s.loraCache.StoreResponseInfo(model, current, totalTokens)
 			}
 			s.loraCache.AdapterMap.Range(func(k, v any) bool {
 				log.Printf("Adapter: %+v Entries: %+v", k, v)
@@ -795,54 +783,6 @@ func (s *server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 	}
 }
 
-func (s *server) isFairRequest(adapter string) bool {
-	current := time.Now().Unix()
-	adapterTokens := 0
-	total := 0
-	adapterCount := 0
-	fmt.Println("Liveness", adapter)
-	s.loraCache.AdapterMap.Range(func(k, v any) bool {
-		local_sum := 0
-		for _, entry := range v.([]TokenRepsonseData) {
-			if entry.Time > int64(current-TTL) {
-				local_sum += entry.TokenCount
-			}
-		}
-		if local_sum > 0 {
-			adapterCount = adapterCount + 1
-		}
-		if k.(string) == adapter {
-			adapterTokens = local_sum
-		} else {
-			fmt.Println("k adapter:", k, adapter)
-		}
-		total += local_sum
-		return true
-	})
-	if adapterCount == 0 {
-		fmt.Println("No adapter")
-		return true
-	}
-	fairShare := total / adapterCount
-	fmt.Println("adapter Tokens: %+v; Fair share %+v", adapterTokens, fairShare)
-	if adapterTokens > fairShare {
-		return false
-	}
-	return true
-}
-
-type TokenCache struct {
-	AdapterMap sync.Map
-}
-type TokenRepsonseData struct {
-	Time       int64
-	TokenCount int
-}
-
-func CreateNewTokenCache() *TokenCache {
-	return &TokenCache{AdapterMap: sync.Map{}}
-}
-
 func main() {
 	podsFlag := flag.String("pods", "", "Comma-separated list of pod addresses")
 	podIPsFlag := flag.String("podIPs", "", "Comma-separated list of pod IPs")
@@ -881,7 +821,7 @@ func main() {
 
 	s := grpc.NewServer()
 
-	extProcPb.RegisterExternalProcessorServer(s, &server{loraCache: CreateNewTokenCache()})
+	extProcPb.RegisterExternalProcessorServer(s, &server{loraCache: CreateNewTokenCache(int64(7))})
 	healthPb.RegisterHealthServer(s, &healthServer{})
 
 	log.Println("Starting gRPC server on port :50051")
