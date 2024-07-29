@@ -9,15 +9,9 @@ spec:
   - name: genai-inference-gateway
   rules:
   - backendRefs:
-    - name: vllm-lora
-      port: 8000
+    - name: llm-envoy-proxy
+      port: 80
       kind: Service
     timeouts:
       request: "1000s"
       backendRequest: "1000s"
-    filters:
-    - type: RequestHeaderModifier
-      requestHeaderModifier:
-        set:
-        - name: "target-pod"
-          value: "${.Source.Address}"

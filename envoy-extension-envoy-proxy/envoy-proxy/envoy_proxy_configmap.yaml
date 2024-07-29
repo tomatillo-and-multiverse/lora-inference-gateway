@@ -1,19 +1,10 @@
----
-apiVersion: gateway.envoyproxy.io/v1alpha1
-kind: EnvoyProxy
+apiVersion: v1
+kind: ConfigMap
 metadata:
-  name: custom-proxy-config
-  namespace: envoy-gateway-system
-spec:
-  provider:
-    type: Kubernetes
-    kubernetes:
-      envoyDeployment:
-        container:
-          image: envoyproxy/envoy:v1.31-latest
-  bootstrap:
-    type: Merge
-    value: |
+  name: envoy-config
+data:
+  envoy.yaml: |
+    static_resources:
       listeners:
         - name: listener_0
           address:
@@ -51,39 +42,12 @@ spec:
           connect_timeout: 6s
           lb_policy: CLUSTER_PROVIDED
           dns_lookup_family: V4_ONLY
-      # Enable detailed logging
-      layered_runtime:
-        layers:
-          - name: static_layer
-            static_layer:
-              envoy:
-                logging:
-                  level: debug
-          
-
-
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: genai-inference-gateway
-spec:
-  controllerName: gateway.envoyproxy.io/gatewayclass-controller
-  parametersRef:
-    group: gateway.envoyproxy.io
-    kind: EnvoyProxy
-    name: custom-proxy-config
-    namespace: envoy-gateway-system
-
-
----
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: genai-inference-gateway
-spec:
-  gatewayClassName: genai-inference-gateway
-  listeners:
-    - name: http
-      protocol: HTTP
-      port: 8080
+    # Enable detailed logging
+    layered_runtime:
+      layers:
+        - name: static_layer
+          static_layer:
+            envoy:
+              logging:
+                level: debug
+    cluster_manager: {}
