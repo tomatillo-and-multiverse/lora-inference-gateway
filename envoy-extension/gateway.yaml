@@ -12,7 +12,7 @@ spec:
         container:
           image: envoyproxy/envoy:v1.31-latest
   bootstrap:
-    type: Merge
+    type: Merge 
     value: |
       listeners:
         - name: listener_0
@@ -33,6 +33,12 @@ spec:
                         - name: backend
                           domains: ["*"]
                           routes:
+                            - match:
+                                prefix: "/m"
+                              direct_response:
+                                status: 404
+                                body:
+                                  inline_string: "No matching route found"
                             - match:
                                 prefix: "/"
                               route:  
@@ -59,6 +65,7 @@ spec:
               envoy:
                 logging:
                   level: debug
+
           
 
 
