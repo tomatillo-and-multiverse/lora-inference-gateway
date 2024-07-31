@@ -14,20 +14,23 @@ import (
 	"strings"
 	"time"
 
+	"ext-proc/handlers"
+	"ext-proc/metrics"
+	"ext-proc/scheduling"
+
 	"github.com/coocood/freecache"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"github.com/ekkinox/ext-proc-demo/ext-proc/metrics"
-	"github.com/ekkinox/ext-proc-demo/ext-proc/handlers"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"google.golang.org/grpc/credentials"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
-	 "google.golang.org/grpc/credentials"
 )
 
 type extProcServer struct{}
-type server struct {}
+type server struct{}
+
 var (
 	port                              int
 	certPath                          string
@@ -59,7 +62,7 @@ func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Create TLS configuration
 	tlsConfig := &tls.Config{
-		RootCAs: certPool,
+		RootCAs:    certPool,
 		ServerName: "grpc-ext-proc.envoygateway",
 	}
 
@@ -75,13 +78,9 @@ func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	_ = conn
 }
 
-
-
-
-
 func main() {
 	flag.IntVar(&port, "port", 9002, "gRPC port")
-    flag.StringVar(&certPath, "certPath", "", "path to extProcServer certificate and private key")
+	flag.StringVar(&certPath, "certPath", "", "path to extProcServer certificate and private key")
 	podsFlag := flag.String("pods", "", "Comma-separated list of pod addresses")
 	podIPsFlag := flag.String("podIPs", "", "Comma-separated list of pod IPs")
 	flag.Parse()
@@ -116,44 +115,41 @@ func main() {
 	go metrics.FetchMetricsPeriodically(pods, podIPMap, cacheActiveLoraModel, cachePendingRequestActiveAdapters, interval)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-    if err != nil {
-    		log.Fatalf("failed to listen: %v", err)
-    	}
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
 
+	creds, err := loadTLSCredentials(certPath)
+	if err != nil {
+		log.Fatalf("Failed to load TLS credentials: %v", err)
+	}
 
-    creds, err := loadTLSCredentials(certPath)
-    if err != nil {
-    		log.Fatalf("Failed to load TLS credentials: %v", err)
-    	}
+	s := grpc.NewServer(grpc.Creds(creds))
 
-    s := grpc.NewServer(grpc.Creds(creds))
-
-
-    extProcPb.RegisterExternalProcessorServer(s, &handlers.Server{
+	extProcPb.RegisterExternalProcessorServer(s, &handlers.Server{
 		Pods:                              pods,
 		PodIPMap:                          podIPMap,
 		IpPodMap:                          ipPodMap,
 		CacheActiveLoraModel:              cacheActiveLoraModel,
 		CachePendingRequestActiveAdapters: cachePendingRequestActiveAdapters,
+		TokenCache:                        scheduling.CreateNewTokenCache(int64(7)),
 	})
 	healthPb.RegisterHealthServer(s, &healthServer{})
 
 	log.Println("Starting gRPC server on port :9002")
 
-		
-
 	go func() {
-    		err = s.Serve(lis)
-    		if err != nil {
-    			log.Fatalf("failed to serve: %v", err)
-    		}
-    	}()
+		err = s.Serve(lis)
+		if err != nil {
+			log.Fatalf("failed to serve: %v", err)
+		}
+	}()
 
 	http.HandleFunc("/healthz", healthCheckHandler)
-    err = http.ListenAndServe(":8080", nil)
-    if err != nil {
-    		log.Fatalf("failed to serve: %v", err)
-    	}
+	err = http.ListenAndServe(":8080", nil)
+	if err != nil {
+		log.Fatalf("failed to serve: %v", err)
+	}
 }
 func loadTLSCredentials(certPath string) (credentials.TransportCredentials, error) {
 	// Load extProcServer's certificate and private key

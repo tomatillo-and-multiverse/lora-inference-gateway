@@ -1,4 +1,4 @@
-module github.com/ekkinox/ext-proc-demo/ext-proc
+module ext-proc
 
 go 1.21
 
