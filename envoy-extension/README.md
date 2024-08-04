@@ -26,7 +26,7 @@ This project contains the necessary configurations and code to set up and deploy
    - **Important:** Update this file with the pod names and internal IP addresses of the vLLM replicas.
    - **Important:** Update this file with the image created using the Dockerfile.
 
-### vLLM files (located in `vLLM` folder)
+### vLLM Manifests (located in `vllm` folder)
 
 1. **vllm-lora-service.yaml**
    - Service configuration for the vLLM LoRa (Low-Rank Adaptation) service. Exposes the service within the Kubernetes cluster.
