@@ -2,32 +2,31 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/coocood/freecache"
+	"github.com/ekkinox/ext-proc-demo/ext-proc/handlers"
+	"github.com/ekkinox/ext-proc-demo/ext-proc/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"github.com/ekkinox/ext-proc-demo/ext-proc/metrics"
-	"github.com/ekkinox/ext-proc-demo/ext-proc/handlers"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
-	 "google.golang.org/grpc/credentials"
 )
 
 type extProcServer struct{}
-type server struct {}
+type server struct{}
+
 var (
 	port                              int
 	certPath                          string
@@ -51,37 +50,9 @@ func (s *healthServer) Watch(in *healthPb.HealthCheckRequest, srv healthPb.Healt
 	return status.Error(codes.Unimplemented, "Watch is not implemented")
 }
 
-func healthCheckHandler(w http.ResponseWriter, r *http.Request) {
-	certPool, err := loadCA(certPath)
-	if err != nil {
-		log.Fatalf("Could not load CA certificate: %v", err)
-	}
-
-	// Create TLS configuration
-	tlsConfig := &tls.Config{
-		RootCAs: certPool,
-		ServerName: "grpc-ext-proc.envoygateway",
-	}
-
-	// Create gRPC dial options
-	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
-	}
-
-	conn, err := grpc.Dial("localhost:9002", opts...)
-	if err != nil {
-		log.Fatalf("Could not connect: %v", err)
-	}
-	_ = conn
-}
-
-
-
-
-
 func main() {
 	flag.IntVar(&port, "port", 9002, "gRPC port")
-    flag.StringVar(&certPath, "certPath", "", "path to extProcServer certificate and private key")
+	flag.StringVar(&certPath, "certPath", "", "path to extProcServer certificate and private key")
 	podsFlag := flag.String("pods", "", "Comma-separated list of pod addresses")
 	podIPsFlag := flag.String("podIPs", "", "Comma-separated list of pod IPs")
 	flag.Parse()
@@ -116,20 +87,13 @@ func main() {
 	go metrics.FetchMetricsPeriodically(pods, podIPMap, cacheActiveLoraModel, cachePendingRequestActiveAdapters, interval)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-    if err != nil {
-    		log.Fatalf("failed to listen: %v", err)
-    	}
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
 
+	s := grpc.NewServer()
 
-    creds, err := loadTLSCredentials(certPath)
-    if err != nil {
-    		log.Fatalf("Failed to load TLS credentials: %v", err)
-    	}
-
-    s := grpc.NewServer(grpc.Creds(creds))
-
-
-    extProcPb.RegisterExternalProcessorServer(s, &handlers.Server{
+	extProcPb.RegisterExternalProcessorServer(s, &handlers.Server{
 		Pods:                              pods,
 		PodIPMap:                          podIPMap,
 		IpPodMap:                          ipPodMap,
@@ -140,57 +104,18 @@ func main() {
 
 	log.Println("Starting gRPC server on port :9002")
 
-		
-
+	// shutdown
+	var gracefulStop = make(chan os.Signal)
+	signal.Notify(gracefulStop, syscall.SIGTERM)
+	signal.Notify(gracefulStop, syscall.SIGINT)
 	go func() {
-    		err = s.Serve(lis)
-    		if err != nil {
-    			log.Fatalf("failed to serve: %v", err)
-    		}
-    	}()
+		sig := <-gracefulStop
+		log.Printf("caught sig: %+v", sig)
+		log.Println("Wait for 1 second to finish processing")
+		time.Sleep(1 * time.Second)
+		os.Exit(0)
+	}()
 
-	http.HandleFunc("/healthz", healthCheckHandler)
-    err = http.ListenAndServe(":8080", nil)
-    if err != nil {
-    		log.Fatalf("failed to serve: %v", err)
-    	}
-}
-func loadTLSCredentials(certPath string) (credentials.TransportCredentials, error) {
-	// Load extProcServer's certificate and private key
-	crt := "server.crt"
-	key := "server.key"
+	s.Serve(lis)
 
-	if certPath != "" {
-		if !strings.HasSuffix(certPath, "/") {
-			certPath = fmt.Sprintf("%s/", certPath)
-		}
-		crt = fmt.Sprintf("%s%s", certPath, crt)
-		key = fmt.Sprintf("%s%s", certPath, key)
-	}
-	certificate, err := tls.LoadX509KeyPair(crt, key)
-	if err != nil {
-		return nil, fmt.Errorf("could not load extProcServer key pair: %s", err)
-	}
-
-	// Create a new credentials object
-	creds := credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{certificate}})
-
-	return creds, nil
-}
-
-func loadCA(caPath string) (*x509.CertPool, error) {
-	ca := x509.NewCertPool()
-	caCertPath := "server.crt"
-	if caPath != "" {
-		if !strings.HasSuffix(caPath, "/") {
-			caPath = fmt.Sprintf("%s/", caPath)
-		}
-		caCertPath = fmt.Sprintf("%s%s", caPath, caCertPath)
-	}
-	caCert, err := os.ReadFile(caCertPath)
-	if err != nil {
-		return nil, fmt.Errorf("could not read ca certificate: %s", err)
-	}
-	ca.AppendCertsFromPEM(caCert)
-	return ca, nil
 }

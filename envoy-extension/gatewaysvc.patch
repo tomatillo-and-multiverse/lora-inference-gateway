@@ -1,0 +1,1 @@
+kubectl patch svc envoy-default-inference-gateway-6454a873  -n envoy-gateway-system -p '{"spec": {"ports": [{"name": "http-8081", "port": 8081, "targetPort": 8081, "protocol": "TCP"}]}}'
