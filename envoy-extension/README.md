@@ -7,7 +7,7 @@ This project contains the necessary configurations and code to set up and deploy
 
 ## Files
 
-### Kubernetes Manifests
+### Gateway Manifests
 
 1. **gateway.yaml**
    - Configuration file to create Envoy GatewayClass, Envoy Gateway and bootstrap the Envoy Gateway.
