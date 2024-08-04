@@ -14,8 +14,8 @@ This project contains the necessary configurations and code to set up and deploy
    - **Detailed Description:**
      - The bootstrap config custom-proxy-config, configures Envoy to listen on port 8081 and sets up HTTP filters for external processing (`ext_proc`) and original destination load balancing.
      - The listener on port 8081 is configured to handle incoming HTTP requests and route them based on custom logic.
-     - The (External Processing (ext_proc))[https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_proc/v3/ext_proc.proto.html] filter is used for external processing of HTTP requests, allowing for custom request handling and routing decisions.
-     - The (Original Destination Cluster)[https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/original_dst] is used to route traffic to the original destination specified in the `target-pod` header.
+     - The [External Processing (ext_proc)](https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_proc/v3/ext_proc.proto.html) filter is used for external processing of HTTP requests, allowing for custom request handling and routing decisions.
+     - The [Original Destination Cluster](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/original_dst) is used to route traffic to the original destination specified in the `target-pod` header.
      - This configuration ensures that requests are processed and routed efficiently based on custom logic defined in the external processing service.
 
 2. **gatewaysvc.patch**
