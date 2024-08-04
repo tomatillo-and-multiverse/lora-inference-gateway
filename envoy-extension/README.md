@@ -26,10 +26,12 @@ This project contains the necessary configurations and code to set up and deploy
    - **Important:** Update this file with the pod names and internal IP addresses of the vLLM replicas.
    - **Important:** Update this file with the image created using the Dockerfile.
 
-4. **vllm-lora-service.yaml**
+### vLLM files (located in `vLLM` folder)
+
+1. **vllm-lora-service.yaml**
    - Service configuration for the vLLM LoRa (Low-Rank Adaptation) service. Exposes the service within the Kubernetes cluster.
 
-5. **vllm-lora-deployment.yaml**
+2. **vllm-lora-deployment.yaml**
    - Deployment configuration for the vLLM LoRa service. Defines how the service is deployed, including replicas, containers, and other deployment details.
    - **Note:** This deployment uses a custom image from [vLLM LoRa](https://github.com/kaushikmitr/vllm/tree/lora).
 
@@ -74,8 +76,8 @@ This project contains the necessary configurations and code to set up and deploy
    ```bash
    kubectl apply -f gateway.yaml
    kubectl apply -f ext_proc.yaml
-   kubectl apply -f vllm-lora-service.yaml
-   kubectl apply -f vllm-lora-deployment.yaml
+   kubectl apply -f vllm/vllm-lora-service.yaml
+   kubectl apply -f vllm/vllm-lora-deployment.yaml
    ```
 
 4. **Patch the Gateway Service (Update based on actual service name)**
