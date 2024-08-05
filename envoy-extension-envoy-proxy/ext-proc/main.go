@@ -132,7 +132,7 @@ func main() {
 		IpPodMap:                          ipPodMap,
 		CacheActiveLoraModel:              cacheActiveLoraModel,
 		CachePendingRequestActiveAdapters: cachePendingRequestActiveAdapters,
-		TokenCache:                        scheduling.CreateNewTokenCache(int64(7)),
+		TokenCache:                        scheduling.CreateNewTokenCache(TTL),
 	})
 	healthPb.RegisterHealthServer(s, &healthServer{})
 
