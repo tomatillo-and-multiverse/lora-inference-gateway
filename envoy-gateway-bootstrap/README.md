@@ -4,7 +4,7 @@
 ## Overview
 
 This project contains the necessary configurations and code to set up and deploy a service using Kubernetes, Envoy, and Go. The service involves routing based on HTTP headers, collecting metrics, and ensuring efficient load balancing.
-![image](files:lora-inference-gateway/envoy-gateway-bootstrap/envoy-gateway-bootstrap.jpeg)
+![image](files:envoy-gateway-bootstrap.jpeg)
 ## Files
 
 ### Gateway Manifests
