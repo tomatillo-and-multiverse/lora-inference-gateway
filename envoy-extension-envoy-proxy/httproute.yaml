@@ -12,6 +12,3 @@ spec:
     - name: llm-envoy-proxy
       port: 80
       kind: Service
-    timeouts:
-      request: "1000s"
-      backendRequest: "1000s"

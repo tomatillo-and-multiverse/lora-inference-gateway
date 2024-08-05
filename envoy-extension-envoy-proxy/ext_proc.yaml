@@ -53,12 +53,12 @@ spec:
     spec:
       containers:
       - name: grpc-ext-proc
-        image: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo/envoy-gateway-grpc-vllm-lora-go:latest
+        image: us-east1-docker.pkg.dev/kfswain-gke-dev/test-repo/ext-proc@sha256:cd17ece85562dc34d993243fb21004bda5a808ac2e03846d9e59091de3431bdd
         args:
         - -pods
-        - "vllm-0,vllm-1,vllm-2"
+        - "all-gpu-vllm-0"
         - -podIPs
-        - "10.8.2.81:8000,10.8.0.77:8000,10.8.2.82:8000"  
+        - "10.100.11.6:80"  
         - -certPath
         - "/app/certs"
         ports:

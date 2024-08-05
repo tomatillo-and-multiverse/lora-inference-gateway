@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/coocood/freecache"
-	"github.com/prometheus/common/expfmt"
 	io_prometheus_client "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
 
-	"github.com/ekkinox/ext-proc-demo/ext-proc/cache"
+	"ext-proc/cache"
 )
 
 // Contains checks if a slice contains a specific element
