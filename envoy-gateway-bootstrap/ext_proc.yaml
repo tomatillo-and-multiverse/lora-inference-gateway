@@ -19,9 +19,9 @@ spec:
         image: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo/grpc-vllm-lora-go-1:latest
         args:
         - -pods
-        - "vllm-6679456895-2v5b8,vllm-6679456895-dfg8k,vllm-6679456895-mwxh9"
+        - "vllm-6679456895-8znkx,vllm-6679456895-nnf6d,vllm-6679456895-zzxz6"
         - -podIPs
-        - "10.8.2.192:8000,10.8.0.92:8000,10.8.3.183:8000" 
+        - "10.8.2.194:8000,10.8.3.185:8000,10.8.0.94:8000" 
         ports:
         - containerPort: 9002
       - name: curl
@@ -39,4 +39,4 @@ spec:
     - protocol: TCP
       port: 9002
       targetPort: 9002
-  type: LoadBalancer
+  type: ClusterIP

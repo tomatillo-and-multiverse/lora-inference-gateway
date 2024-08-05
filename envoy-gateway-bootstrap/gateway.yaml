@@ -78,7 +78,7 @@ spec:
                     - endpoint:
                         address:
                           socket_address:
-                            address: 34.143.230.19
+                            address: 10.96.167.20
                             port_value: 9002
 ---
 apiVersion: gateway.networking.k8s.io/v1

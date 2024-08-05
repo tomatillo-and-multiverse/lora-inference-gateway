@@ -22,7 +22,7 @@ models = [
 ]
 
 model_map = {
-    "35.240.136.223": models,
+    "34.143.230.19": models,
 }
 
 def create_json(ip: str, model: str = None) -> dict:
@@ -30,11 +30,13 @@ def create_json(ip: str, model: str = None) -> dict:
         model = random.choice(model_map[ip])
     return {"prompt": "Is the Necronomicon in the movie: Army of Darkness?", "max_tokens": 750, "model": model}
 
-async def parallelized_benchmarking(session: aiohttp.ClientSession, ip: str, model: str = None):
+async def parallelized_benchmarking(session: aiohttp.ClientSession, ip: str, model: str = None, specify_target_pod: bool = False):
     try:
         json_data = create_json(ip, model)
         url = f"http://{ip}:8081/v1/completions"
-        headers = {'lora-adapter': json_data['model']}
+        headers = {'Content-Type': 'application/json'}
+        if specify_target_pod:
+            headers['target-pod'] = get_target_pods()
         async with session.post(url, json=json_data, headers=headers) as response:
             response_json = await response.json()
             metrics["total_tokens_generated"] += int(response_json['usage']['completion_tokens'])
@@ -58,14 +60,18 @@ async def parallelized_benchmarking(session: aiohttp.ClientSession, ip: str, mod
         metrics["server_disconnected"] += 1
 
 def ips(n_reqs: int):
-    available_ips = ["35.240.136.223"]
+    available_ips = ["34.143.230.19"]
     for _ in range(n_reqs):
         yield random.choice(available_ips)
 
-async def test_main(n_reqs: int, model: str = None):
+def get_target_pods():
+    available_ips = ["10.8.2.194:8000","10.8.3.185:8000","10.8.0.94:8000" ]
+    return random.choice(available_ips)
+
+async def test_main(n_reqs: int, model: str = None, specify_target_pod: bool = False):
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
-            *[parallelized_benchmarking(session, ip, model) for ip in ips(n_reqs)]
+            *[parallelized_benchmarking(session, ip, model, specify_target_pod) for ip in ips(n_reqs)]
         )
 
 def clear_metrics():
@@ -86,8 +92,9 @@ if __name__ == "__main__":
 
     # Main benchmarking phase
     n_reqs = 1000 
+    specify_target_pod = True
     start = time.perf_counter()
-    asyncio.run(test_main(n_reqs))
+    asyncio.run(test_main(n_reqs=n_reqs, specify_target_pod=specify_target_pod))
     end = time.perf_counter()
     
     bad_requests = sum(metrics[key] for key in ["dropped_requests", "timeout_requests", "os_errors", "bad_content_type", "server_disconnected"])
