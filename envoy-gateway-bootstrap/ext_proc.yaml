@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: grpc-server
-        image: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo/grpc-vllm-lora-go-1:latest
+        image: ghcr.io/tomatillo-and-multiverse/ext-proc:demo
         args:
         - -pods
         - "vllm-6679456895-8znkx,vllm-6679456895-nnf6d,vllm-6679456895-zzxz6"
