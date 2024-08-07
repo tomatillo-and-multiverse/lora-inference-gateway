@@ -15,7 +15,8 @@ spec:
     spec:
       containers:
         - name: lora
-          image: "us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo/vllm-lora"
+        # sourced from fork: https://github.com/kaushikmitr/vllm
+          image: "ghcr.io/tomatillo-and-multiverse/vllm:demo"
           imagePullPolicy: Always
           env:
             - name: PORT
