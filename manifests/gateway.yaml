@@ -11,6 +11,16 @@ spec:
       envoyDeployment:
         container:
           image: envoyproxy/envoy:v1.31-latest
+      envoyService:
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              ports:
+                - name: http-8081
+                  port: 8081
+                  protocol: TCP
+                  targetPort: 8081
   bootstrap:
     type: Merge 
     value: |
@@ -103,3 +113,4 @@ spec:
     - name: http
       protocol: HTTP
       port: 8080
+
