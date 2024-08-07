@@ -13,9 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"ext-proc/handlers"
+	"ext-proc/metrics"
+	"ext-proc/scheduling"
+
 	"github.com/coocood/freecache"
-	"github.com/ekkinox/ext-proc-demo/ext-proc/handlers"
-	"github.com/ekkinox/ext-proc-demo/ext-proc/metrics"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -30,6 +32,7 @@ type server struct{}
 var (
 	port                              int
 	certPath                          string
+	enforeFairness                    bool
 	cacheActiveLoraModel              *freecache.Cache
 	cachePendingRequestActiveAdapters *freecache.Cache
 	pods                              []string
@@ -53,6 +56,7 @@ func (s *healthServer) Watch(in *healthPb.HealthCheckRequest, srv healthPb.Healt
 func main() {
 	flag.IntVar(&port, "port", 9002, "gRPC port")
 	flag.StringVar(&certPath, "certPath", "", "path to extProcServer certificate and private key")
+	enforceFairness := flag.Bool("enable-fairness", false, "flag to enable fairness enforcement over the KV-Cache")
 	podsFlag := flag.String("pods", "", "Comma-separated list of pod addresses")
 	podIPsFlag := flag.String("podIPs", "", "Comma-separated list of pod IPs")
 	flag.Parse()
@@ -99,6 +103,8 @@ func main() {
 		IpPodMap:                          ipPodMap,
 		CacheActiveLoraModel:              cacheActiveLoraModel,
 		CachePendingRequestActiveAdapters: cachePendingRequestActiveAdapters,
+		TokenCache:                        scheduling.CreateNewTokenCache(TTL),
+		EnforceFairness:                   *enforceFairness,
 	})
 	healthPb.RegisterHealthServer(s, &healthServer{})
 

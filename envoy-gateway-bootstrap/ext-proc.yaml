@@ -16,12 +16,15 @@ spec:
     spec:
       containers:
       - name: grpc-server
-        image: ghcr.io/tomatillo-and-multiverse/ext-proc:demo
+        image: ghcr.io/tomatillo-and-multiverse/ext-proc@sha256:91d23afa45efcf81afd85e4e3304d712216db9c1e6038c05224f29f65aa59f5a
         args:
+        #TODO: specify label selector and dynamically update pods
         - -pods
-        - "vllm-6679456895-8znkx,vllm-6679456895-nnf6d,vllm-6679456895-zzxz6"
+        - "all-gpu-vllm-0,partial-load-vllm-0"
         - -podIPs
-        - "10.8.2.194:8000,10.8.3.185:8000,10.8.0.94:8000" 
+        - "10.100.1.4:80,10.100.13.13:80"
+        - -enable-fairness
+        - "false"
         ports:
         - containerPort: 9002
       - name: curl
