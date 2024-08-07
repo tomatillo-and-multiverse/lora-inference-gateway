@@ -27,24 +27,20 @@ This project contains the necessary configurations and code to set up and deploy
 1. **Apply Kubernetes Manifests**
    ```bash
    cd manifests
-   kubectl apply -f gateway.yaml
    kubectl apply -f ext_proc.yaml
    kubectl apply -f vllm/vllm-lora-service.yaml
    kubectl apply -f vllm/vllm-lora-deployment.yaml
    ```
-2. **Get the Gateway Service Name**
-   ```bash
-   kubectl get services -n envoy-gateway-system
-   ```
 
-
-3. **Patch the Gateway Service (Using service name)**
-   ```bash
-    kubectl patch svc envoy-default-inference-gateway-xxxxxxxx  -n envoy-gateway-system -p '{"spec": {"ports": [{"name": "http-8081", "port": 8081, "targetPort": 8081, "protocol": "TCP"}]}}'
-   ```
-
-4. **Update `ext_proc.yaml`**
+2. **Update `ext_proc.yaml`**
    - Ensure the `ext_proc.yaml` is updated with the pod names and internal IP addresses of the vLLM replicas. This step is crucial for the correct routing of requests based on headers.
+
+2. **Update and apply `gateway.yaml`**
+   - Ensure the `gateway.yaml` is updated with the internal IP addresses of the ExtProc service. This step is also crucial for the correct routing of requests based on headers.
+    ```bash
+   cd manifests
+   kubectl apply -f gateway.yaml
+   ```
 
 ### Monitoring and Metrics
 
