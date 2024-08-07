@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: grpc-server
-        image: ghcr.io/tomatillo-and-multiverse/ext-proc@sha256:29d20d13e50f78bdded256281bb9ec50e7715cfc73bd631c10f31ca4bef8218a
+        image: ghcr.io/tomatillo-and-multiverse/ext-proc:demo
         args:
         #TODO: specify label selector and dynamically update pods
         - -pods
