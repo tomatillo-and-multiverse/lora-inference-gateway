@@ -146,7 +146,7 @@ func (s *Server) HandleRequestBody(req *extProcPb.ProcessingRequest, targetPodIP
 	}
 
 	var resp *extProcPb.ProcessingResponse
-	if !s.TokenCache.IsFairRequest(loraAdapterRequested) {
+	if s.EnforceFairness && !s.TokenCache.IsFairRequest(loraAdapterRequested) {
 		resp = &extProcPb.ProcessingResponse{
 			Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 				ImmediateResponse: &extProcPb.ImmediateResponse{
