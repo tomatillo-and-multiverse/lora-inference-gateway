@@ -19,10 +19,9 @@ This project contains the necessary configurations and code to set up and deploy
      - The [Original Destination Cluster](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/load_balancing/original_dst) is used to route traffic to the original destination specified in the `target-pod` header.
      - This configuration ensures that requests are processed and routed efficiently based on custom logic defined in the external processing service.
 
-2. **gatewaysvc.patch**
-   - A sample command to patch the Envoy Gateway service, adding a new port 8081.
 
-3. **ext_proc.yaml**
+
+2. **ext_proc.yaml**
    - External processing configuration for Envoy. Handles custom routing logic and processing of requests based on specific headers.
    - **Important:** Update this file with the pod names and internal IP addresses of the vLLM replicas.
    - **Important:** Update this file with the image created using the Dockerfile.
@@ -81,14 +80,14 @@ This project contains the necessary configurations and code to set up and deploy
    kubectl apply -f vllm/vllm-lora-deployment.yaml
    ```
 
-4. **Patch the Gateway Service (Update based on actual service name)**
-   ```bash
-        kubectl patch svc envoy-default-inference-gateway-xxxxxxxx  -n envoy-gateway-system -p '{"spec": {"ports": [{"name": "http-8081", "port": 8081, "targetPort": 8081, "protocol": "TCP"}]}}'
-   ```
 
-5. **Update `ext_proc.yaml`**
+
+4. **Update `ext_proc.yaml`**
    - Ensure the `ext_proc.yaml` is updated with the pod names and internal IP addresses of the vLLM replicas. This step is crucial for the correct routing of requests based on headers.
    - Ensure the `ext_proc.yaml` is updated with the image created using the Dockerfile.
+
+4. **Update `gateway.yaml`**
+   - Ensure the `ateway.yaml` is updated with the internal IP addresses of the Ext Proc. 
 
 ### Monitoring and Metrics
 
