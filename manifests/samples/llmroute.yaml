@@ -1,0 +1,29 @@
+---
+apiVersion: inference.x-k8s.io/v1alpha1
+kind: LLMRoute
+metadata:
+  name: coding-sql
+spec:
+  parentRefs:
+  - name: genai-inference-gateway
+    namespace: default
+  backendRefs: 
+  - kind: Service
+    name: vllm-server-backend-pool
+  model:
+    name: coding-sql
+
+---
+apiVersion: inference.x-k8s.io/v1alpha1
+kind: LLMRoute
+metadata:
+  name: tweet-summary
+spec:
+  parentRefs:
+  - name: genai-inference-gateway
+    namespace: default
+  backendRefs: 
+  - kind: Service
+    name: vllm-server-backend-pool
+  model:
+    name: tweet-summary
