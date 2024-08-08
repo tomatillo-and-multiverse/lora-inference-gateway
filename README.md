@@ -15,7 +15,9 @@ This project sets up an Envoy gateway with a custom external processing which  i
 
 ### Steps
 1. **Install LLMRoute CRD**
-   TODO:
+   ```bash
+   kubectl apply -f ./crd/config/crd/bases/
+   ```
 
 1. **Install GatewayClass**
    A custom GatewayClass `llm-gateway` which is configured with the llm routing ext proc will be installed into the `llm-gateway` namespace. When you create Gateways, make sure the `llm-gateway` GatewayClass is used.
@@ -30,6 +32,7 @@ This project sets up an Envoy gateway with a custom external processing which  i
    ```bash
    kubectl apply -f ./manifests/vllm
    kubectl apply -f ./manifests/samples/gateway.yaml
+   kubectl apply -f ./manifests/samples/llmroute.yaml
    ```
 
 2. **Try it out** 
