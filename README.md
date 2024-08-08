@@ -1,58 +1,55 @@
 # Envoy Ext Proc Gateway with LoRA Integration
 
-This project sets up an Envoy gateway to handle gRPC calls with integration of LoRA (Low-Rank Adaptation). The configuration aims to manage gRPC traffic through Envoy's external processing and custom routing based on headers and load balancing rules. The setup includes Kubernetes services and deployments for both the gRPC server and the vllm-lora application.
+This project sets up an Envoy gateway with a custom external processing which  implements advanced routing logic tailored for LoRA (Low-Rank Adaptation) adapters. The routing algorithm is based on the model specified (using Open AI API format), and ensuring efficient load balancing based on model server metrics.
+
+![alt text](./doc/envoy-gateway-bootstrap.png)
 
 ## Requirements
-- A vLLM based deployment (using the custom image provided below), with LoRA Adapters
+- A vLLM based deployment (using the custom image provided below), with LoRA Adapters.  ***This PoC uses a modified vLLM fork, the public image of the fork is here: `ghcr.io/tomatillo-and-multiverse/vllm:demo`***. A sample deployement is provided under `./manifests/samples/vllm`.
 - Kubernetes cluster
 - Envoy Gateway v1.1 installed on your cluster: https://gateway.envoyproxy.io/v1.1/tasks/quickstart/
 - `kubectl` command-line tool
 - Go (for local development)
 
-## vLLM
-***This PoC uses a modified vLLM fork, the public image of the fork is here: `ghcr.io/tomatillo-and-multiverse/vllm:demo`***
-
-
-## Overview
-
-This project contains the necessary configurations and code to set up and deploy a service using Kubernetes, Envoy, and Go. The service involves routing based on the model specified (using Open AI API format), collecting metrics, and ensuring efficient load balancing.
-
-![alt text](https://github.com/tomatillo-and-multiverse/lora-inference-gateway/blob/final-poc/envoy-gateway-bootstrap.png)
-
-
 ## Quickstart
 
 ### Steps
+1. **Install LLMRoute CRD**
+   TODO:
 
-1. **Apply Kubernetes Manifests**
+1. **Install GatewayClass**
+   A custom GatewayClass `llm-gateway` which is configured with the llm routing ext proc will be installed into the `llm-gateway` namespace. When you create Gateways, make sure the `llm-gateway` GatewayClass is used.
+
+   NOTE: Ensure the `llm-route-ext-proc` deployment is updated with the pod names and internal IP addresses of the vLLM replicas. This step is crucial for the correct routing of requests based on headers. This won't be needed once we make ext proc dynamically read the pods.
+
    ```bash
-   cd manifests
-   kubectl apply -f ext_proc.yaml
-   kubectl apply -f vllm/vllm-lora-service.yaml
-   kubectl apply -f vllm/vllm-lora-deployment.yaml
+   kubectl apply -f ./manifests/gatewayclass.yaml
+   ```
+1. **Deploy Sample Application**
+   
+   ```bash
+   kubectl apply -f ./manifests/vllm
+   kubectl apply -f ./manifests/samples/gateway.yaml
    ```
 
-2. **Update `ext_proc.yaml`**
-   - Ensure the `ext_proc.yaml` is updated with the pod names and internal IP addresses of the vLLM replicas. This step is crucial for the correct routing of requests based on headers.
+2. **Try it out** 
+   ```bash
+   IP=$(kubectl get gateway/llm-gateway -o jsonpath='{.status.addresses[0].value}')
+   PORT=8081
 
-2. **Update and apply `gateway.yaml`**
-   - Ensure the `gateway.yaml` is updated with the internal IP addresses of the ExtProc service. This step is also crucial for the correct routing of requests based on headers.
-    ```bash
-   cd manifests
-   kubectl apply -f gateway.yaml
+   curl -i ${IP}:${PORT}/v1/completions -H 'Content-Type: application/json' -d '{
+   "model": "tweet-summary",
+   "prompt": "Write as if you were a critic: San Francisco",
+   "max_tokens": 100,
+   "temperature": 0
+   }'
    ```
-
-### Monitoring and Metrics
-
-- The Go application collects metrics and saves the latest response headers in memory.
-- Ensure Envoy is configured to route based on the metrics collected from the `/metric` endpoint of different service pods.
 
 ## Contributing
 
 1. Fork the repository.
-2. Create a new branch.
-3. Make your changes.
-4. Open a pull request.
+1. Make your changes.
+1. Open a pull request.
 
 ## License
 
