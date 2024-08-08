@@ -21,15 +21,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// LLMRouteSpec defines the desired state of LLMRoute
+// LLMRouteSpec defines the desired state of LLMRoute.
 type LLMRouteSpec struct {
-	GatewayRef corev1.ObjectReference `json:"gatewayRef,omitempty"`
-	// BackendPoolRef is a reference to the backend pool that serves this frontend.
-	BackendPoolRef corev1.ObjectReference `json:"backendPoolRef,omitempty"`
-	Adapter        Model                  `json:"adapter,omitempty"`
-	// Priority of this frontend among all frontends deployed to the same backend. Low priority
-	// frontends may be evicted by high priority frontends when the backend is overloaded.
-	Priority int `json:"priority,omitempty"`
+	// ParentRefs references the resources (usually Gateways) that a Route wants to be attached to.
+	ParentRefs []corev1.ObjectReference `json:"parentRefs,omitempty"`
+	// BackendRefs defines the backend(s) where matching requests should be sent.
+	// Default is a k8s service.
+	BackendRefs []corev1.ObjectReference `json:"backendRefs,omitempty"`
+	Model       Model                    `json:"model,omitempty"`
 }
 
 type Model struct {
@@ -38,8 +37,6 @@ type Model struct {
 
 // LLMRouteStatus defines the observed state of LLMRoute
 type LLMRouteStatus struct {
-	// Address of the frontend the client can make requests to.
-	Addresses  string             `json:"addresses,omitempty"`
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
