@@ -11,6 +11,7 @@ RUN go build -o /ext-proc
 FROM alpine:latest
 ## Multistage deploy
 FROM gcr.io/distroless/base-debian10
+# Install bash
 
 WORKDIR /
 COPY --from=build /ext-proc /ext-proc

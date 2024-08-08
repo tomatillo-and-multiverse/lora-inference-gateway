@@ -1,0 +1,77 @@
+
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: genai-inference-gateway
+spec:
+  gatewayClassName: genai-inference-gateway
+  listeners:
+  - protocol: HTTP
+    port: 80
+    name: http
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      containers:
+        - name: lora
+          image: "us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo/vllm-lora"
+          imagePullPolicy: Always
+          env:
+          - name: HUGGING_FACE_HUB_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: hf-token
+                key: HF_TOKEN
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          resources:
+            limits:
+              cpu: "4"
+              ephemeral-storage: 20Gi
+              memory: 27041Mi
+              nvidia.com/gpu: "1"
+            requests:
+              cpu: "4"
+              ephemeral-storage: 20Gi
+              memory: 27041Mi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - mountPath: /data
+              name: data
+            - mountPath: /dev/shm
+              name: shm
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: shm
+          emptyDir:
+            medium: Memory
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-server-backend-pool
+  labels:
+    inference.x-k8s.io/lora-backend: "true"
+spec:
+  selector:
+    app: vllm
+  ports:
+    - port: 80
