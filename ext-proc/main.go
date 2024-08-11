@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -13,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"ext-proc/cache"
 	"ext-proc/handlers"
 	"ext-proc/metrics"
 	"ext-proc/scheduling"
@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	klog "k8s.io/klog/v2"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	healthPb "google.golang.org/grpc/health/grpc_health_v1"
@@ -35,7 +36,7 @@ var (
 	enforeFairness                    bool
 	cacheActiveLoraModel              *freecache.Cache
 	cachePendingRequestActiveAdapters *freecache.Cache
-	pods                              []string
+	podNames                          []string
 	podIPMap                          map[string]string
 	ipPodMap                          map[string]string
 	interval                          = 30 * time.Second // Update interval for fetching metrics
@@ -45,7 +46,7 @@ var (
 type healthServer struct{}
 
 func (s *healthServer) Check(ctx context.Context, in *healthPb.HealthCheckRequest) (*healthPb.HealthCheckResponse, error) {
-	log.Printf("Handling grpc Check request + %s", in.String())
+	klog.Infof("Handling grpc Check request + %s", in.String())
 	return &healthPb.HealthCheckResponse{Status: healthPb.HealthCheckResponse_SERVING}, nil
 }
 
@@ -62,23 +63,27 @@ func main() {
 	flag.Parse()
 
 	if *podsFlag == "" || *podIPsFlag == "" {
-		log.Fatal("No pods or pod IPs provided. Use the -pods and -podIPs flags to specify comma-separated lists of pod addresses and pod IPs.")
+		klog.Fatal("No pods or pod IPs provided. Use the -pods and -podIPs flags to specify comma-separated lists of pod addresses and pod IPs.")
 	}
 
-	pods = strings.Split(*podsFlag, ",")
+	podNames = strings.Split(*podsFlag, ",")
 	podIPs := strings.Split(*podIPsFlag, ",")
 
-	if len(pods) != len(podIPs) {
-		log.Fatal("The number of pod addresses and pod IPs must match.")
+	if len(podNames) != len(podIPs) {
+		klog.Fatal("The number of pod addresses and pod IPs must match.")
 	}
 
-	podIPMap = make(map[string]string)
-	for i := range pods {
-		podIPMap[pods[i]] = podIPs[i]
-	}
-	ipPodMap = make(map[string]string)
-	for i := range podIPs {
-		ipPodMap[podIPs[i]] = pods[i]
+	fmt.Printf("Pods: %v", podNames)
+	pods := make([]cache.Pod, 0, len(podNames))
+	ipToPods := make(map[string]*cache.Pod, len(podIPs))
+	for i, p := range podNames {
+		pod := cache.Pod{
+			Namespace: "default",
+			Name:      p,
+			Address:   podIPs[i],
+		}
+		pods = append(pods, pod)
+		ipToPods[podIPs[i]] = &pod
 	}
 
 	// cache init
@@ -87,20 +92,19 @@ func main() {
 	debug.SetGCPercent(20)
 
 	// Start the periodic metrics fetching in a separate goroutine
-
-	go metrics.FetchMetricsPeriodically(pods, podIPMap, cacheActiveLoraModel, cachePendingRequestActiveAdapters, interval)
+	fetcher := &metrics.PodMetrics{}
+	store := metrics.NewStore(fetcher, cacheActiveLoraModel, cachePendingRequestActiveAdapters, pods)
+	go store.FetchMetricsPeriodically(interval)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		klog.Fatalf("failed to listen: %v", err)
 	}
 
 	s := grpc.NewServer()
 
 	extProcPb.RegisterExternalProcessorServer(s, &handlers.Server{
-		Pods:                              pods,
-		PodIPMap:                          podIPMap,
-		IpPodMap:                          ipPodMap,
+		Pods:                              ipToPods,
 		CacheActiveLoraModel:              cacheActiveLoraModel,
 		CachePendingRequestActiveAdapters: cachePendingRequestActiveAdapters,
 		TokenCache:                        scheduling.CreateNewTokenCache(TTL),
@@ -108,7 +112,7 @@ func main() {
 	})
 	healthPb.RegisterHealthServer(s, &healthServer{})
 
-	log.Println("Starting gRPC server on port :9002")
+	klog.Infof("Starting gRPC server on port :%v", port)
 
 	// shutdown
 	var gracefulStop = make(chan os.Signal)
@@ -116,9 +120,7 @@ func main() {
 	signal.Notify(gracefulStop, syscall.SIGINT)
 	go func() {
 		sig := <-gracefulStop
-		log.Printf("caught sig: %+v", sig)
-		log.Println("Wait for 1 second to finish processing")
-		time.Sleep(1 * time.Second)
+		klog.Infof("caught sig: %+v", sig)
 		os.Exit(0)
 	}()
 

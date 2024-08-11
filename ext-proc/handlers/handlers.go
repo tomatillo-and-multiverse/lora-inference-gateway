@@ -4,30 +4,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"math"
+	"math/rand"
 	"strconv"
 	"strings"
 	"time"
 
-	"ext-proc/cache"
-	"ext-proc/metrics"
-	"ext-proc/scheduling"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	klog "k8s.io/klog/v2"
 
+	"github.com/coocood/freecache"
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	filterPb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
-	"github.com/coocood/freecache"
+	"ext-proc/cache"
+	"ext-proc/scheduling"
 )
 
 type Server struct {
-	Pods                              []string
-	PodIPMap                          map[string]string
-	IpPodMap                          map[string]string
+	Pods                              map[string]*cache.Pod
 	CacheActiveLoraModel              *freecache.Cache
 	CachePendingRequestActiveAdapters *freecache.Cache
 	TokenCache                        *scheduling.TokenCache
@@ -35,10 +33,7 @@ type Server struct {
 }
 
 func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
-	log.Println(" ")
-	log.Println(" ")
-	log.Println("Started process:  -->  ")
-
+	klog.V(1).Info("Started process:  -->  ")
 	ctx := srv.Context()
 	targetPodIP := ""
 
@@ -57,24 +52,22 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
 
-		log.Println(" ")
-		log.Println(" ")
-		log.Println("Got stream:  -->  ")
+		klog.V(1).Info("Got stream:  -->  ")
 
 		resp := &extProcPb.ProcessingResponse{}
 		switch v := req.Request.(type) {
 		case *extProcPb.ProcessingRequest_RequestHeaders:
 			resp, targetPodIP = s.HandleRequestHeaders(req, targetPodIP)
 		case *extProcPb.ProcessingRequest_RequestBody:
-			resp, targetPodIP = s.HandleRequestBody(req, targetPodIP)
+			resp, targetPodIP, err = s.HandleRequestBody(req, targetPodIP)
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
 			resp, targetPodIP = s.HandleResponseHeaders(req, targetPodIP)
 		default:
-			log.Printf("Unknown Request type %+v\n", v)
+			klog.Info("Unknown Request type %+v\n", v)
 		}
 
 		if err := srv.Send(resp); err != nil {
-			log.Printf("send error %v", err)
+			klog.Info("send error %v", err)
 		}
 	}
 }
@@ -88,27 +81,29 @@ func valueExists(m map[string]string, valueToFind string) bool {
 	return false
 }
 
-func (s *Server) HandleRequestBody(req *extProcPb.ProcessingRequest, targetPodIP string) (*extProcPb.ProcessingResponse, string) {
-	log.Println("--- In RequestBody processing")
+func (s *Server) HandleRequestBody(req *extProcPb.ProcessingRequest, targetPodIP string) (*extProcPb.ProcessingResponse, string, error) {
+	var err error
+	klog.V(2).Infof("--- In RequestBody processing: %v\n", targetPodIP)
 	var requestBody map[string]interface{}
 	v := req.Request.(*extProcPb.ProcessingRequest_RequestBody)
 	if err := json.Unmarshal(v.RequestBody.Body, &requestBody); err != nil {
-		log.Printf("Error unmarshaling request body: %v", err)
-		return nil, targetPodIP
+		klog.V(1).Infof("Error unmarshaling request body: %v", err)
+		return nil, targetPodIP, fmt.Errorf("error unmarshaling request body: %v", err)
 	}
 
 	loraAdapterRequested, ok := requestBody["model"].(string)
 	if !ok {
-		log.Println("model/lora-adapter not found in request body")
-		return nil, targetPodIP
+		klog.V(2).Info("model not found in request body")
+		return nil, targetPodIP, fmt.Errorf("model not found in request")
 	}
 
+	klog.V(2).Infof("Model requested: %v", loraAdapterRequested)
 	threshold := 100000
 	thresholdValue, ok := requestBody["threshold"].(float64)
 	if ok {
 		threshold = int(thresholdValue)
 	}
-	targetPod := ""
+	var targetPod *cache.Pod
 
 	if targetPodIP == "" {
 		// Retrieve metrics from cache
@@ -116,33 +111,36 @@ func (s *Server) HandleRequestBody(req *extProcPb.ProcessingRequest, targetPodIP
 		var requestMetrics []cache.PendingRequestActiveAdaptersMetrics
 
 		for _, pod := range s.Pods {
-			loraMetric, err := cache.GetCacheActiveLoraModel(s.CacheActiveLoraModel, pod, loraAdapterRequested)
+			loraMetric, err := cache.GetCacheActiveLoraModel(s.CacheActiveLoraModel, *pod, loraAdapterRequested)
 			if err == nil {
 				loraMetrics = append(loraMetrics, *loraMetric)
 			} else if err != freecache.ErrNotFound {
-				log.Printf("Error fetching cacheActiveLoraModel for pod %s and lora_adapter_requested %s: %v", pod, loraAdapterRequested, err)
+				klog.V(1).Infof("Error fetching cacheActiveLoraModel for pod %s and lora_adapter_requested %s: %v", pod, loraAdapterRequested, err)
 			}
 
-			requestMetric, err := cache.GetCachePendingRequestActiveAdapters(s.CachePendingRequestActiveAdapters, pod)
+			requestMetric, err := cache.GetCachePendingRequestActiveAdapters(s.CachePendingRequestActiveAdapters, *pod)
 			if err == nil {
 				requestMetrics = append(requestMetrics, *requestMetric)
 			} else if err != freecache.ErrNotFound {
-				log.Printf("Error fetching cachePendingRequestActiveAdapters for pod %s: %v", pod, err)
+				klog.V(1).Infof("Error fetching cachePendingRequestActiveAdapters for pod %s: %v", pod, err)
 				break
 			}
 		}
 
-		fmt.Printf("Fetched loraMetrics: %+v\n", loraMetrics)
-		fmt.Printf("Fetched requestMetrics: %+v\n", requestMetrics)
+		klog.V(2).Infof("Fetched loraMetrics: %+v\n", loraMetrics)
+		klog.V(2).Infof("Fetched requestMetrics: %+v\n", requestMetrics)
 
-		targetPod = metrics.FindTargetPod(loraMetrics, requestMetrics, loraAdapterRequested, threshold)
-		targetPodIP = s.PodIPMap[targetPod]
-		fmt.Printf("Selected target pod: %s\n", targetPod)
-		fmt.Printf("Selected target pod IP: %s\n", targetPodIP)
+		targetPod, err = findTargetPod(loraMetrics, requestMetrics, loraAdapterRequested, threshold)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to find target pod")
+		}
+		targetPodIP = targetPod.Address
+		klog.V(2).Infof("Selected target pod: %s\n", targetPod)
+		klog.V(2).Infof("Selected target pod IP: %s\n", targetPodIP)
 	} else {
-		targetPod = s.IpPodMap[targetPodIP]
-		fmt.Printf("Pre-selected target pod: %s\n", targetPod)
-		fmt.Printf("Pre-selected target pod IP: %s\n", targetPodIP)
+		targetPod = s.Pods[targetPodIP]
+		klog.V(2).Infof("Pre-selected target pod: %s\n", targetPod)
+		klog.V(2).Infof("Pre-selected target pod IP: %s\n", targetPodIP)
 	}
 
 	var resp *extProcPb.ProcessingResponse
@@ -156,7 +154,7 @@ func (s *Server) HandleRequestBody(req *extProcPb.ProcessingRequest, targetPodIP
 				},
 			},
 		}
-	} else if !metrics.Contains(s.Pods, targetPod) {
+	} else if _, ok := s.Pods[targetPodIP]; !ok {
 		resp = &extProcPb.ProcessingResponse{
 			Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 				ImmediateResponse: &extProcPb.ImmediateResponse{
@@ -184,7 +182,7 @@ func (s *Server) HandleRequestBody(req *extProcPb.ProcessingRequest, targetPodIP
 
 		// Print headers
 		for _, header := range headers {
-			fmt.Printf("[request_body] Header Key: %s, Header Value: %s\n", header.Header.Key, header.Header.RawValue)
+			klog.V(2).Infof("[request_body] Header Key: %s, Header Value: %s\n", header.Header.Key, header.Header.RawValue)
 		}
 
 		resp = &extProcPb.ProcessingResponse{
@@ -199,15 +197,15 @@ func (s *Server) HandleRequestBody(req *extProcPb.ProcessingRequest, targetPodIP
 			},
 		}
 	}
-	return resp, targetPodIP
+	return resp, targetPodIP, nil
 }
 
 func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetPodIP string) (*extProcPb.ProcessingResponse, string) {
-	log.Println("--- In ResponseHeaders processing")
+	klog.V(2).Info("--- In ResponseHeaders processing")
 	r := req.Request
 	h := r.(*extProcPb.ProcessingRequest_ResponseHeaders)
 
-	log.Printf("Headers: %+v\n", h)
+	klog.V(2).Infof("Headers: %+v\n", h)
 
 	var loraMetrics []cache.ActiveLoraModelMetrics
 	var requestMetrics []cache.PendingRequestActiveAdaptersMetrics
@@ -217,27 +215,27 @@ func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetP
 	var err error
 	currentTime := time.Now().Unix()
 	pendingQueueSize := -1
-	podAdapterMap := make(map[string]int)
-	targetPod := s.IpPodMap[targetPodIP]
+	podAdapterMap := make(map[cache.Pod]int)
+	targetPod := s.Pods[targetPodIP]
 	for _, header := range h.ResponseHeaders.Headers.Headers {
 		switch header.Key {
 		case "active_lora_adapters":
 			err = json.Unmarshal([]byte(header.RawValue), &modelNames)
 			if err != nil {
-				log.Printf("Error parsing model_names: %v", err)
+				klog.V(1).Infof("Error parsing model_names: %v", err)
 			}
 		case "pending_queue_size":
 			var err error
 			pendingQueueSize, err = strconv.Atoi(string(header.RawValue))
 			if err != nil {
-				log.Printf("Error converting pending_queue_size: %v", err)
+				klog.V(1).Infof("Error converting pending_queue_size: %v", err)
 			}
 		case "model":
 			model = string(header.RawValue)
 		case "total_tokens":
 			totalTokens, err = strconv.Atoi(string(header.RawValue))
 			if err != nil {
-				log.Printf("Error parsing total_tokens: %v", err)
+				klog.V(1).Infof("Error parsing total_tokens: %v", err)
 			}
 		}
 	}
@@ -245,41 +243,41 @@ func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetP
 		for modelName, numberOfPendingRequests := range modelNames {
 			metric := cache.ActiveLoraModelMetrics{
 				Date:                    time.Now().Format(time.RFC3339),
-				PodName:                 targetPod,
+				Pod:                     *targetPod,
 				ModelName:               modelName,
 				NumberOfPendingRequests: numberOfPendingRequests,
 			}
-			podAdapterMap[metric.PodName]++
+			podAdapterMap[metric.Pod]++
 			loraMetrics = append(loraMetrics, metric)
 		}
 		// Update cache with parsed values
 		for _, metric := range loraMetrics {
 			if err := cache.SetCacheActiveLoraModel(s.CacheActiveLoraModel, metric); err != nil {
-				log.Printf("Error setting cache in Response Header: %v", err)
+				klog.V(1).Infof("Error setting cache in Response Header: %v", err)
 			}
 		}
 	}
 	if pendingQueueSize >= 0 {
 		requestMetric := cache.PendingRequestActiveAdaptersMetrics{
 			Date:                   time.Now().Format(time.RFC3339),
-			PodName:                targetPod,
+			Pod:                    *targetPod,
 			PendingRequests:        pendingQueueSize,
-			NumberOfActiveAdapters: podAdapterMap[targetPod],
+			NumberOfActiveAdapters: podAdapterMap[*targetPod],
 		}
 		requestMetrics = append(requestMetrics, requestMetric)
 		for _, metric := range requestMetrics {
 			if err := cache.SetCachePendingRequestActiveAdapters(s.CachePendingRequestActiveAdapters, metric); err != nil {
-				log.Printf("Error setting cache in Response Header: %v", err)
+				klog.V(1).Infof("Error setting cache in Response Header: %v", err)
 			}
 		}
 	}
-	log.Printf("Model Value: %v", model)
-	log.Printf("Total Tokens: %v", totalTokens)
+	klog.V(2).Infof("Model Value: %v", model)
+	klog.V(2).Infof("Total Tokens: %v", totalTokens)
 	if "model" != "" {
 		s.TokenCache.StoreResponseInfo(model, currentTime, totalTokens)
 	}
 	s.TokenCache.AdapterMap.Range(func(k, v any) bool {
-		log.Printf("Adapter: %+v Entries: %+v", k, v)
+		klog.V(2).Infof("Adapter: %+v Entries: %+v", k, v)
 		return true
 	})
 
@@ -298,7 +296,7 @@ func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetP
 							{
 								Header: &configPb.HeaderValue{
 									Key:      "target-pod",
-									RawValue: []byte(targetPod),
+									RawValue: []byte(targetPod.Address),
 								},
 							},
 						},
@@ -307,16 +305,16 @@ func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetP
 			},
 		},
 	}
-	return resp, targetPod
+	return resp, targetPod.Address
 }
 
 func (s *Server) HandleRequestHeaders(req *extProcPb.ProcessingRequest, targetPodIP string) (*extProcPb.ProcessingResponse, string) {
-	log.Println("--- In RequestHeaders processing ...")
+	klog.V(2).Info("--- In RequestHeaders processing ...")
 	r := req.Request
 	h := r.(*extProcPb.ProcessingRequest_RequestHeaders)
 
-	log.Printf("Headers: %+v\n", h)
-	log.Printf("EndOfStream: %v\n", h.RequestHeaders.EndOfStream)
+	klog.V(2).Infof("Headers: %+v\n", h)
+	klog.V(2).Infof("EndOfStream: %v\n", h.RequestHeaders.EndOfStream)
 	for _, n := range h.RequestHeaders.Headers.Headers {
 		if strings.ToLower(n.Key) == "target-pod" {
 			targetPodIP = string(n.RawValue)
@@ -384,9 +382,96 @@ func (s *Server) HandleRequestHeaders(req *extProcPb.ProcessingRequest, targetPo
 		}
 	}
 	// Print final headers being sent
-	fmt.Println("[request_header]Final headers being sent:")
+	klog.V(2).Info("[request_header]Final headers being sent:")
 	for _, header := range resp.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders() {
-		fmt.Printf("%s: %s\n", header.GetHeader().Key, header.GetHeader().RawValue)
+		klog.V(2).Infof("%s: %s\n", header.GetHeader().Key, header.GetHeader().RawValue)
 	}
 	return resp, targetPodIP
+}
+
+// findTargetPod finds the target pod based on metrics and the requested lora adapter
+func findTargetPod(loraMetrics []cache.ActiveLoraModelMetrics, requestMetrics []cache.PendingRequestActiveAdaptersMetrics, loraAdapterRequested string, threshold int) (*cache.Pod, error) {
+	var targetPod *cache.Pod
+	var bestAlternativePod *cache.Pod
+	minAltRequests := math.MaxInt
+
+	klog.V(2).Info("Searching for the best pod...")
+
+	// Filter metrics for the requested model
+	for _, reqMetric := range requestMetrics {
+		if reqMetric.PendingRequests < minAltRequests {
+			minAltRequests = reqMetric.PendingRequests
+			bestAlternativePod = &reqMetric.Pod
+		}
+	}
+
+	if loraAdapterRequested == "" && bestAlternativePod != nil {
+		klog.V(2).Infof("Selected the best alternative pod: %s with %d pending requests\n", bestAlternativePod, minAltRequests)
+		return bestAlternativePod, nil
+	}
+
+	var relevantMetrics []cache.ActiveLoraModelMetrics
+	for _, metric := range loraMetrics {
+		if metric.ModelName == loraAdapterRequested {
+			relevantMetrics = append(relevantMetrics, metric)
+		}
+	}
+
+	// If no metrics found for the requested model, choose the pod with the least active adapters randomly
+	if len(relevantMetrics) == 0 {
+		minActiveAdapters := math.MaxInt
+		var podsWithLeastAdapters []cache.PendingRequestActiveAdaptersMetrics
+		for _, reqMetric := range requestMetrics {
+			if reqMetric.NumberOfActiveAdapters < minActiveAdapters {
+				minActiveAdapters = reqMetric.NumberOfActiveAdapters
+				podsWithLeastAdapters = []cache.PendingRequestActiveAdaptersMetrics{}
+			}
+			if reqMetric.NumberOfActiveAdapters == minActiveAdapters {
+				podsWithLeastAdapters = append(podsWithLeastAdapters, reqMetric)
+			}
+		}
+
+		if len(podsWithLeastAdapters) == 0 {
+			return nil, fmt.Errorf("no pod with min adapter found")
+		}
+		rand.Seed(time.Now().UnixNano())
+		targetPod = &podsWithLeastAdapters[rand.Intn(len(podsWithLeastAdapters))].Pod
+		klog.V(2).Infof("Selected pod with the least active adapters: %s\n", targetPod)
+		return targetPod, nil
+	}
+
+	// Find the pod with the max lora requests among the relevant metrics
+	maxNumberOfPendingRequests := -1
+	var bestPods []cache.ActiveLoraModelMetrics
+	for _, metric := range relevantMetrics {
+		if metric.ModelName == loraAdapterRequested {
+			if metric.NumberOfPendingRequests > maxNumberOfPendingRequests {
+				maxNumberOfPendingRequests = metric.NumberOfPendingRequests
+				bestPods = []cache.ActiveLoraModelMetrics{}
+			}
+			if metric.NumberOfPendingRequests == maxNumberOfPendingRequests {
+				bestPods = append(bestPods, metric)
+			}
+		}
+	}
+
+	if len(bestPods) > 0 {
+		rand.Seed(time.Now().UnixNano())
+		targetPod = &bestPods[rand.Intn(len(bestPods))].Pod
+		klog.V(2).Infof("Selected pod with the highest NumberOfPendingRequests: %s\n", targetPod)
+	} else {
+		klog.V(2).Infof("No pods match the requested model: %s\n", loraAdapterRequested)
+	}
+
+	// If the number of active Lora adapters in the selected pod is greater than the threshold, choose the pod with the least requests
+	if maxNumberOfPendingRequests > threshold && bestAlternativePod != nil {
+		targetPod = bestAlternativePod
+		klog.V(2).Infof("Selected pod's active Lora adapters exceed threshold, selecting the best alternative pod: %s with %d pending requests\n", targetPod, minAltRequests)
+	}
+
+	if targetPod == nil {
+		return nil, fmt.Errorf("No pod found")
+	}
+
+	return targetPod, nil
 }
