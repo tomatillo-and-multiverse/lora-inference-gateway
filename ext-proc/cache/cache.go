@@ -5,24 +5,35 @@ import (
 	"fmt"
 
 	"github.com/coocood/freecache"
+	klog "k8s.io/klog/v2"
 )
+
+type Pod struct {
+	Namespace string
+	Name      string
+	Address   string
+}
+
+func (p Pod) String() string {
+	return p.Namespace + "." + p.Name
+}
 
 type ActiveLoraModelMetrics struct {
 	Date                    string
-	PodName                 string
+	Pod                     Pod
 	ModelName               string
 	NumberOfPendingRequests int
 }
 
 type PendingRequestActiveAdaptersMetrics struct {
 	Date                   string
-	PodName                string
+	Pod                    Pod
 	PendingRequests        int
 	NumberOfActiveAdapters int
 }
 
 func SetCacheActiveLoraModel(cache *freecache.Cache, metric ActiveLoraModelMetrics) error {
-	cacheKey := fmt.Sprintf("%s:%s", metric.PodName, metric.ModelName)
+	cacheKey := fmt.Sprintf("%s:%s", metric.Pod, metric.ModelName)
 	cacheValue, err := json.Marshal(metric)
 	if err != nil {
 		return fmt.Errorf("error marshaling ActiveLoraModelMetrics for key %s: %v", cacheKey, err)
@@ -31,12 +42,12 @@ func SetCacheActiveLoraModel(cache *freecache.Cache, metric ActiveLoraModelMetri
 	if err != nil {
 		return fmt.Errorf("error setting cacheActiveLoraModel for key %s: %v", cacheKey, err)
 	}
-	fmt.Printf("Set cacheActiveLoraModel - Key: %s, Value: %s\n", cacheKey, cacheValue)
+	klog.V(2).Infof("Set cacheActiveLoraModel - Key: %s, Value: %s\n", cacheKey, cacheValue)
 	return nil
 }
 
 func SetCachePendingRequestActiveAdapters(cache *freecache.Cache, metric PendingRequestActiveAdaptersMetrics) error {
-	cacheKey := fmt.Sprintf("%s:", metric.PodName)
+	cacheKey := fmt.Sprintf("%s:", metric.Pod)
 	cacheValue, err := json.Marshal(metric)
 	if err != nil {
 		return fmt.Errorf("error marshaling PendingRequestActiveAdaptersMetrics for key %s: %v", cacheKey, err)
@@ -45,12 +56,12 @@ func SetCachePendingRequestActiveAdapters(cache *freecache.Cache, metric Pending
 	if err != nil {
 		return fmt.Errorf("error setting cachePendingRequestActiveAdapters for key %s: %v", cacheKey, err)
 	}
-	fmt.Printf("Set cachePendingRequestActiveAdapters - Key: %s, Value: %s\n", cacheKey, cacheValue)
+	klog.V(2).Infof("Set cachePendingRequestActiveAdapters - Key: %s, Value: %s\n", cacheKey, cacheValue)
 	return nil
 }
 
-func GetCacheActiveLoraModel(cache *freecache.Cache, podName, modelName string) (*ActiveLoraModelMetrics, error) {
-	cacheKey := fmt.Sprintf("%s:%s", podName, modelName)
+func GetCacheActiveLoraModel(cache *freecache.Cache, pod Pod, modelName string) (*ActiveLoraModelMetrics, error) {
+	cacheKey := fmt.Sprintf("%s:%s", pod, modelName)
 
 	value, err := cache.Get([]byte(cacheKey))
 	if err != nil {
@@ -61,12 +72,12 @@ func GetCacheActiveLoraModel(cache *freecache.Cache, podName, modelName string) 
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling ActiveLoraModelMetrics for key %s: %v", cacheKey, err)
 	}
-	fmt.Printf("Got cacheActiveLoraModel - Key: %s, Value: %s\n", cacheKey, value)
+	klog.V(2).Infof("Got cacheActiveLoraModel - Key: %s, Value: %s\n", cacheKey, value)
 	return &metric, nil
 }
 
-func GetCachePendingRequestActiveAdapters(cache *freecache.Cache, podName string) (*PendingRequestActiveAdaptersMetrics, error) {
-	cacheKey := fmt.Sprintf("%s:", podName)
+func GetCachePendingRequestActiveAdapters(cache *freecache.Cache, pod Pod) (*PendingRequestActiveAdaptersMetrics, error) {
+	cacheKey := fmt.Sprintf("%s:", pod)
 
 	value, err := cache.Get([]byte(cacheKey))
 	if err != nil {
@@ -77,6 +88,6 @@ func GetCachePendingRequestActiveAdapters(cache *freecache.Cache, podName string
 	if err != nil {
 		return nil, fmt.Errorf("error unmarshaling PendingRequestActiveAdaptersMetrics for key %s: %v", cacheKey, err)
 	}
-	fmt.Printf("Got cachePendingRequestActiveAdapters - Key: %s, Value: %s\n", cacheKey, value)
+	klog.V(2).Infof("Got cachePendingRequestActiveAdapters - Key: %s, Value: %s\n", cacheKey, value)
 	return &metric, nil
 }
