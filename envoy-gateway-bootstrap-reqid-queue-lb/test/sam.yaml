@@ -1,0 +1,13 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: run-python-script-1
+spec:
+  template:
+    spec:
+      containers:
+      - name: python
+        image: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo/lb_script_1:latest
+        command: ["python", "qps1.py"]
+      restartPolicy: Never
+  backoffLimit: 4
