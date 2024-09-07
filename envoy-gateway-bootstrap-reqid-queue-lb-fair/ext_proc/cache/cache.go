@@ -171,7 +171,7 @@ func GetLRUCacheLLMRequest(cache *expirable.LRU[string, LLMRequest], reqID strin
 		//fmt.Printf("Retrieved LLMRequest with ReqID: %s\n", reqID)
 		return &req, true
 	}
-	fmt.Printf("LLMRequest with ReqID: %s not found in cache\n", reqID)
+	//fmt.Printf("LLMRequest with ReqID: %s not found in cache\n", reqID)
 	return &LLMRequest{}, false
 }
 
@@ -225,7 +225,7 @@ func SetCacheActiveLoraModel(cache *freecache.Cache, metric ActiveLoraModelMetri
 	if err != nil {
 		return fmt.Errorf("error setting cacheActiveLoraModel for key %s: %v", cacheKey, err)
 	}
-	fmt.Printf("Set cacheActiveLoraModel - Key: %s, Value: %s\n", cacheKey, cacheValue)
+	//fmt.Printf("Set cacheActiveLoraModel - Key: %s, Value: %s\n", cacheKey, cacheValue)
 	return nil
 }
 

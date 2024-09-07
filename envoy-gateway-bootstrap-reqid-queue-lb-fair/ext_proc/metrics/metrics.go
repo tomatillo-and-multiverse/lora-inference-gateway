@@ -11,6 +11,7 @@ import (
 	"github.com/coocood/freecache"
 
 	"ext-proc/cache"
+	// Add this line to import the package that contains the FetchMetrics function
 )
 
 // Calculate the 99th percentile of latencies
@@ -30,6 +31,7 @@ func determinePodsWithLora(
 	loraAdapterRequested string,
 	loraMetrics []cache.ActiveLoraModelMetrics,
 	requestMetrics []cache.PendingRequestActiveAdaptersMetrics,
+	verbose bool,
 ) ([]string, bool) {
 	var podsWithLora []string
 	podsWithLoraFound := false
@@ -42,7 +44,9 @@ func determinePodsWithLora(
 				podsWithLoraFound = true
 			}
 		}
-		fmt.Printf("[determinePodsWithLora] Pods with requested Lora adapter: %v\n", podsWithLora)
+		if verbose {
+			fmt.Printf("[determinePodsWithLora] Pods with requested Lora adapter: %v\n", podsWithLora)
+		}
 
 		// If no pods with the requested adapter were found, select pods with the minimum adapters loaded
 		if len(podsWithLora) == 0 {
@@ -57,7 +61,9 @@ func determinePodsWithLora(
 					podsWithLora = append(podsWithLora, metric.PodName)
 				}
 			}
-			fmt.Printf("[determinePodsWithLora] Pods with minimum Lora adapters loaded: %v\n", podsWithLora)
+			if verbose {
+				fmt.Printf("[determinePodsWithLora] Pods with minimum Lora adapters loaded: %v\n", podsWithLora)
+			}
 		}
 
 	} else {
@@ -65,7 +71,9 @@ func determinePodsWithLora(
 		for _, metric := range requestMetrics {
 			podsWithLora = append(podsWithLora, metric.PodName)
 		}
-		fmt.Printf("[determinePodsWithLora] All pods considered: %v\n", podsWithLora)
+		if verbose {
+			fmt.Printf("[determinePodsWithLora] All pods considered: %v\n", podsWithLora)
+		}
 	}
 
 	return podsWithLora, podsWithLoraFound
@@ -161,6 +169,7 @@ func DetermineCandidatePods(
 	useCase string,
 	targetTailLatencyInSecPerToken float64,
 	maxAllowedKVCachePerc float64,
+	verbose bool,
 ) []string {
 	var candidatePods []string
 	if targetTailLatencyInSecPerToken > 0 {
@@ -177,7 +186,7 @@ func DetermineCandidatePods(
 			}
 		}
 	} else {
-		candidatePods = determineBasedOnKVCache(podsWithLora, podUseCaseMetricsMap, useCase, maxAllowedKVCachePerc)
+		candidatePods = determineBasedOnKVCache(podsWithLora, podUseCaseMetricsMap, useCase, maxAllowedKVCachePerc, verbose)
 	}
 	return candidatePods
 }
@@ -188,6 +197,7 @@ func determineBasedOnKVCache(
 	podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics,
 	useCase string,
 	maxAllowedKVCachePerc float64,
+	verbose bool,
 ) []string {
 	var candidatePods []string
 	minKVCacheUtilization := 2.0
@@ -198,7 +208,9 @@ func determineBasedOnKVCache(
 		minKVCacheUtilization = math.Min(podUseCaseMetricsMap[basekey].PseudoGPUKVCacheUsagePerc, minKVCacheUtilization)
 		maxKVCacheUtilization = math.Max(podUseCaseMetricsMap[basekey].PseudoGPUKVCacheUsagePerc, maxKVCacheUtilization)
 	}
-	fmt.Printf("[FindTargetPod] Min KVCache Utilization: %f, Max KVCache Utilization: %f\n", minKVCacheUtilization, maxKVCacheUtilization)
+	if verbose {
+		fmt.Printf("[FindTargetPod] Min KVCache Utilization: %f, Max KVCache Utilization: %f\n", minKVCacheUtilization, maxKVCacheUtilization)
+	}
 	if minKVCacheUtilization <= maxAllowedKVCachePerc {
 		//maxTokensPending := 0
 		maxGPUKVCacheUsagePerc := -1.0
@@ -212,14 +224,16 @@ func determineBasedOnKVCache(
 				candidatePods = []string{pod}
 			}
 		}
-		fmt.Printf("[FindTargetPod] Candidate pods based on max tokens pending: %v with max token pending %v\n", candidatePods, maxGPUKVCacheUsagePerc)
+		if verbose {
+			fmt.Printf("[FindTargetPod] Candidate pods based on max tokens pending: %v with max token pending %v\n", candidatePods, maxGPUKVCacheUsagePerc)
+		}
 	}
 
 	return candidatePods
 }
 
 // selectPodWithMinPending selects a pod with the minimum pending requests, randomizing if there are multiple
-func selectPodWithMinPending(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics) string {
+func selectPodWithMinPending(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, verbose bool) string {
 	minKVCacheUtilization := 2.0
 	var minPendingPods []string
 	for key, metrics := range podUseCaseMetricsMap {
@@ -234,17 +248,32 @@ func selectPodWithMinPending(podUseCaseMetricsMap map[string]*cache.PodUseCaseMe
 		}
 	}
 	selectedPod := minPendingPods[rand.Intn(len(minPendingPods))]
-	fmt.Printf("[FindTargetPod] Randomized among pods with min pending requests: %s\n", selectedPod)
+
+	if verbose {
+		fmt.Printf("[FindTargetPod] Randomized among pods with min pending requests: %s\n", selectedPod)
+	}
 	return selectedPod
 }
 
 // SelectTargetPod selects the target pod from the list of candidates
-func SelectTargetPod(candidatePods []string, podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, baseModel string) string {
+func SelectTargetPod(candidatePods []string, podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, baseModel string, verbose bool) string {
+	candidatePodsMaximimPending := []string{}
 	if len(candidatePods) > 0 {
-		selectedPod := candidatePods[rand.Intn(len(candidatePods))]
+		maxTokensPending := 0
+		for _, pod := range candidatePods {
+			key := baseModel + ":" + pod
+			if podUseCaseMetricsMap[key].TokensPending == maxTokensPending {
+				candidatePodsMaximimPending = append(candidatePodsMaximimPending, pod)
+			} else if podUseCaseMetricsMap[key].TokensPending > maxTokensPending {
+				maxTokensPending = podUseCaseMetricsMap[key].TokensPending
+				candidatePodsMaximimPending = []string{pod}
+			}
+		}
+		selectedPod := candidatePodsMaximimPending[rand.Intn(len(candidatePodsMaximimPending))]
+
 		return selectedPod
 	}
-	return selectPodWithMinPending(podUseCaseMetricsMap)
+	return selectPodWithMinPending(podUseCaseMetricsMap, verbose)
 }
 
 func SetPodUseCaseMetrics(cachePodUseCaseMetrics *freecache.Cache, podUseCaseMetrics map[string]*cache.PodUseCaseMetrics) error {
@@ -288,21 +317,25 @@ func FindTargetPod(
 	baseModel string,
 	targetTailLatencyInSecPerToken float64,
 	maxAllowedKVCachePerc float64,
+	verbose bool,
 ) string {
 
-	podsWithLora, _ := determinePodsWithLora(loraAdapterRequested, loraMetrics, requestMetrics)
+	podsWithLora, _ := determinePodsWithLora(loraAdapterRequested, loraMetrics, requestMetrics, verbose)
 
-	candidatePods := DetermineCandidatePods(podsWithLora, podUseCaseMetricsMap, useCase, targetTailLatencyInSecPerToken, maxAllowedKVCachePerc)
+	candidatePods := DetermineCandidatePods(podsWithLora, podUseCaseMetricsMap, useCase, targetTailLatencyInSecPerToken, maxAllowedKVCachePerc, verbose)
 
-	return SelectTargetPod(candidatePods, podUseCaseMetricsMap, baseModel)
+	return SelectTargetPod(candidatePods, podUseCaseMetricsMap, baseModel, verbose)
 }
 
 // FetchMetricsPeriodically fetches metrics periodically and updates the cache
-func FetchMetricsPeriodically(pods []string, podIPMap map[string]string, cacheActiveLoraModel *freecache.Cache, cachePendingRequestActiveAdapters *freecache.Cache, interval time.Duration) {
+func FetchMetricsPeriodically(pods []string, podIPMap map[string]string, cacheActiveLoraModel *freecache.Cache, cachePendingRequestActiveAdapters *freecache.Cache, interval time.Duration, verbose bool) {
 	for {
 		loraMetrics, requestMetrics := FetchMetrics(pods, podIPMap)
-		fmt.Printf("fetchMetricsPeriodically requestMetrics: %+v\n", requestMetrics)
-		fmt.Printf("fetchMetricsPeriodically loraMetrics: %+v\n", loraMetrics)
+		if verbose {
+
+			fmt.Printf("fetchMetricsPeriodically requestMetrics: %+v\n", requestMetrics)
+			fmt.Printf("fetchMetricsPeriodically loraMetrics: %+v\n", loraMetrics)
+		}
 		cacheActiveLoraModel.Clear()
 		cachePendingRequestActiveAdapters.Clear()
 		for _, metric := range loraMetrics {

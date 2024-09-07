@@ -72,10 +72,11 @@ func determinePodsWithLora(
 }
 
 // InitializePodUseCaseMetrics initializes the pod model metrics map
-func InitializePodUseCaseMetrics(requestMetrics []cache.PendingRequestActiveAdaptersMetrics, useCase string, loraadapterrequested string) map[string]*cache.PodUseCaseMetrics {
+func InitializePodUseCaseMetrics(requestMetrics []cache.PendingRequestActiveAdaptersMetrics, useCase string, loraadapterrequested string) (map[string]*cache.PodUseCaseMetrics, string) {
 	podUseCaseMetricsMap := make(map[string]*cache.PodUseCaseMetrics)
+	var baseModel string
 	for _, metric := range requestMetrics {
-		baseModel := metric.BaseModel
+		baseModel = metric.BaseModel
 		basekey := baseModel + ":" + metric.PodName
 		if podUseCaseMetricsMap[basekey] == nil {
 			podUseCaseMetricsMap[basekey] = &cache.PodUseCaseMetrics{PodName: metric.PodName, BaseModel: baseModel}
@@ -87,21 +88,22 @@ func InitializePodUseCaseMetrics(requestMetrics []cache.PendingRequestActiveAdap
 		}
 
 	}
-	return podUseCaseMetricsMap
+	return podUseCaseMetricsMap, baseModel
 }
 
 // PopulatePodUseCaseMetrics populates the pod model metrics map with data from loraMetrics and loraRequests
 func PopulatePodUseCaseMetrics(
 	podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics,
+	baseModel string,
 	llmRequests []cache.LLMRequest,
 ) {
 
 	for _, req := range llmRequests {
-		basemodelkey := req.BaseModel + ":" + req.PodName
+		basemodelkey := baseModel + ":" + req.PodName
 		if podUseCaseMetricsMap[basemodelkey] == nil {
-			podUseCaseMetricsMap[basemodelkey] = &cache.PodUseCaseMetrics{PodName: req.PodName, BaseModel: req.BaseModel}
+			podUseCaseMetricsMap[basemodelkey] = &cache.PodUseCaseMetrics{PodName: req.PodName, BaseModel: baseModel}
 		}
-		UpdateMetricsForBaseModel(podUseCaseMetricsMap, req)
+		UpdateMetricsForBaseModel(podUseCaseMetricsMap, req, basemodelkey)
 		useCase := req.UseCase
 		if useCase != "" {
 			UpdateMetricsForUseCase(podUseCaseMetricsMap, req)
@@ -133,8 +135,7 @@ func UpdateMetricsForUseCase(podUseCaseMetricsMap map[string]*cache.PodUseCaseMe
 }
 
 // updateMetricsForRequest updates the metrics for each request
-func UpdateMetricsForBaseModel(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, req cache.LLMRequest) {
-	key := req.BaseModel + ":" + req.PodName
+func UpdateMetricsForBaseModel(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, req cache.LLMRequest, key string) {
 	if req.ReceivedTime != "" {
 		podUseCaseMetricsMap[key].PrefillLatenciesInSecPerToken = append(podUseCaseMetricsMap[key].PrefillLatenciesInSecPerToken, (req.PrefillLatencyInSec)/float64(req.TokensSent))
 		if req.TokensReceived > 1 {
@@ -182,6 +183,12 @@ func DetermineCandidatePods(
 	return candidatePods
 }
 
+// getKeyForPod constructs the key for a pod in the metrics map
+func getKeyForPod(pod, useCase string) string {
+
+	return useCase + ":" + pod
+}
+
 // determineBasedOnKVCache determines candidate pods based on KV cache utilization
 func determineBasedOnKVCache(
 	podsWithLora []string,
@@ -193,17 +200,26 @@ func determineBasedOnKVCache(
 	minKVCacheUtilization := 2.0
 	maxKVCacheUtilization := 0.0
 	for _, pod := range podsWithLora {
-		key := useCase + ":" + pod
+		key := getKeyForPod(pod, useCase)
 		basekey := podUseCaseMetricsMap[key].BaseModel + ":" + pod
 		minKVCacheUtilization = math.Min(podUseCaseMetricsMap[basekey].PseudoGPUKVCacheUsagePerc, minKVCacheUtilization)
 		maxKVCacheUtilization = math.Max(podUseCaseMetricsMap[basekey].PseudoGPUKVCacheUsagePerc, maxKVCacheUtilization)
 	}
 	fmt.Printf("[FindTargetPod] Min KVCache Utilization: %f, Max KVCache Utilization: %f\n", minKVCacheUtilization, maxKVCacheUtilization)
-	if minKVCacheUtilization <= maxAllowedKVCachePerc {
+	if minKVCacheUtilization > maxAllowedKVCachePerc {
+		for _, pod := range podsWithLora {
+			key := getKeyForPod(pod, useCase)
+			basekey := podUseCaseMetricsMap[key].BaseModel + ":" + pod
+			if podUseCaseMetricsMap[basekey].PseudoGPUKVCacheUsagePerc == minKVCacheUtilization {
+				candidatePods = append(candidatePods, pod)
+			}
+		}
+		fmt.Printf("[FindTargetPod] Candidate pods based on min KVCache utilization: %v\n", candidatePods)
+	} else {
 		//maxTokensPending := 0
 		maxGPUKVCacheUsagePerc := -1.0
 		for _, pod := range podsWithLora {
-			key := useCase + ":" + pod
+			key := getKeyForPod(pod, useCase)
 			basekey := podUseCaseMetricsMap[key].BaseModel + ":" + pod
 			if podUseCaseMetricsMap[key].PseudoGPUKVCacheUsagePerc == maxGPUKVCacheUsagePerc {
 				candidatePods = append(candidatePods, pod)
@@ -219,11 +235,11 @@ func determineBasedOnKVCache(
 }
 
 // selectPodWithMinPending selects a pod with the minimum pending requests, randomizing if there are multiple
-func selectPodWithMinPending(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics) string {
+func selectPodWithMinPending(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, baseModel string) string {
 	minKVCacheUtilization := 2.0
 	var minPendingPods []string
-	for key, metrics := range podUseCaseMetricsMap {
-		if key != metrics.BaseModel+":"+metrics.PodName {
+	for _, metrics := range podUseCaseMetricsMap {
+		if metrics.ModelName != baseModel {
 			continue
 		}
 		if metrics.PseudoGPUKVCacheUsagePerc < minKVCacheUtilization {
@@ -244,7 +260,7 @@ func SelectTargetPod(candidatePods []string, podUseCaseMetricsMap map[string]*ca
 		selectedPod := candidatePods[rand.Intn(len(candidatePods))]
 		return selectedPod
 	}
-	return selectPodWithMinPending(podUseCaseMetricsMap)
+	return selectPodWithMinPending(podUseCaseMetricsMap, baseModel)
 }
 
 func SetPodUseCaseMetrics(cachePodUseCaseMetrics *freecache.Cache, podUseCaseMetrics map[string]*cache.PodUseCaseMetrics) error {
@@ -268,9 +284,9 @@ func IsCapacityAvailable(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetric
 }
 
 func UpdatePodUseCaseMetrics(requestMetrics []cache.PendingRequestActiveAdaptersMetrics, llmRequest []cache.LLMRequest, cachePodUseCaseMetrics *freecache.Cache, useCase string, loraAdapterRequested string, baseModel string) map[string]*cache.PodUseCaseMetrics {
-	podUseCaseMetricsMap := InitializePodUseCaseMetrics(requestMetrics, useCase, loraAdapterRequested)
+	podUseCaseMetricsMap, baseModel := InitializePodUseCaseMetrics(requestMetrics, useCase, loraAdapterRequested)
 
-	PopulatePodUseCaseMetrics(podUseCaseMetricsMap, llmRequest)
+	PopulatePodUseCaseMetrics(podUseCaseMetricsMap, baseModel, llmRequest)
 
 	SetPodUseCaseMetrics(cachePodUseCaseMetrics, podUseCaseMetricsMap)
 

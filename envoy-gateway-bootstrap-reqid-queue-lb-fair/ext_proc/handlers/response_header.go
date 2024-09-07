@@ -17,8 +17,11 @@ import (
 	"ext-proc/cache"
 )
 
-func HandleResponseHeaders(req *extProcPb.ProcessingRequest, pods []string, ipPodMap map[string]string, cacheActiveLoraModel, cachePendingRequestActiveAdapters *freecache.Cache, lruCacheLLMRequests *expirable.LRU[string, cache.LLMRequest]) *extProcPb.ProcessingResponse {
-	log.Println("--- In ResponseHeaders processing")
+func HandleResponseHeaders(req *extProcPb.ProcessingRequest, pods []string, ipPodMap map[string]string, cacheActiveLoraModel, cachePendingRequestActiveAdapters *freecache.Cache, lruCacheLLMRequests *expirable.LRU[string, cache.LLMRequest], verbose bool) *extProcPb.ProcessingResponse {
+	if verbose {
+		log.Println("--- In ResponseHeaders processing")
+	}
+
 	r := req.Request
 	h := r.(*extProcPb.ProcessingRequest_ResponseHeaders)
 
@@ -29,7 +32,10 @@ func HandleResponseHeaders(req *extProcPb.ProcessingRequest, pods []string, ipPo
 	prefill_latency_in_sec := 0.0
 	e2e_latency_in_sec := 0.0
 	targetPodIP := ""
-	fmt.Printf("Headers: %+v\n", h)
+
+	if verbose {
+		fmt.Printf("Headers: %+v\n", h)
+	}
 
 	for _, n := range h.ResponseHeaders.Headers.Headers {
 		if strings.ToLower(n.Key) == ":status" {
@@ -68,7 +74,9 @@ func HandleResponseHeaders(req *extProcPb.ProcessingRequest, pods []string, ipPo
 		}
 	}
 	if status != "200" {
-		log.Printf("Request %s failed with status %s", requestID, status)
+		if verbose {
+			log.Printf("Request %s failed with status %s", requestID, status)
+		}
 		cache.DeleteLRUCacheLLMRequest(lruCacheLLMRequests, requestID)
 		return nil
 	}
@@ -76,7 +84,9 @@ func HandleResponseHeaders(req *extProcPb.ProcessingRequest, pods []string, ipPo
 
 	if ok {
 		targetPodIP = llmRequest.IP
-		fmt.Printf("fetched ip for req %s:%s\n", requestID, targetPodIP)
+		if verbose {
+			fmt.Printf("fetched ip for req %s:%s\n", requestID, targetPodIP)
+		}
 		llmRequest.TokensSent = tokensSent
 		llmRequest.TokensReceived = tokensReceived
 		llmRequest.TokensPending = 0
@@ -154,7 +164,9 @@ func HandleResponseHeaders(req *extProcPb.ProcessingRequest, pods []string, ipPo
 	if pendingQueueSize >= 0 {
 		baseModel, err := cache.GetBaseModel(cachePendingRequestActiveAdapters, targetPod)
 		if err == nil {
-			fmt.Printf("fetched baseModel for pod %s", targetPod)
+			if verbose {
+				fmt.Printf("fetched baseModel for pod %s", targetPod)
+			}
 
 		} else if err != freecache.ErrNotFound {
 			log.Printf("Error fetching cachePendingRequestActiveAdapters for pod %s: %v", targetPod, err)

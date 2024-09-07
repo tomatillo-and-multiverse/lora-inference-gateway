@@ -7,7 +7,6 @@ require (
 	github.com/envoyproxy/go-control-plane v0.13.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/google/uuid v1.6.0
-	github.com/hashicorp/golang-lru v1.0.2
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/prometheus/client_model v0.6.1
 	github.com/prometheus/common v0.55.0

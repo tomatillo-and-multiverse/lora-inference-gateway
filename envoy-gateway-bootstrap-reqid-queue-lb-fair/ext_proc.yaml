@@ -24,6 +24,8 @@ spec:
         - "10.56.3.88:8000,10.56.1.36:8000,10.56.2.85:8000" 
         - -maxAllowedKVCachePercent
         - "0.9"
+        - -verbose
+        - "false"
         ports:
         - containerPort: 9002
 ---

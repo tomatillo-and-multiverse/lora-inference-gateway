@@ -8,12 +8,13 @@ import (
 	"google.golang.org/grpc/status"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+
 	"github.com/hashicorp/golang-lru/v2/expirable"
 
 	"github.com/coocood/freecache"
 
 	"ext-proc/cache"
-	pQueue "ext-proc/redispriorityqueue"
+	"ext-proc/redispriorityqueue"
 )
 
 type Server struct {
@@ -24,16 +25,18 @@ type Server struct {
 	CachePendingRequestActiveAdapters *freecache.Cache
 	LRUCacheLLMRequests               *expirable.LRU[string, cache.LLMRequest]
 	CachePodModelMetrics              *freecache.Cache
-	PQ                                *pQueue.RedisPriorityQueue
 	PriorityMap                       map[string]int
-	RedisPQManager                    *pQueue.RedisPriorityQueueManager
+	WFQScheduler                      *redispriorityqueue.WFQScheduler
 	MaxAllowedKVCachePerc             float64
+	Verbose                           bool
 }
 
 func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
-	log.Println(" ")
-	log.Println(" ")
-	log.Println("Started process:  -->  ")
+	if s.Verbose {
+		log.Println(" ")
+		log.Println(" ")
+		log.Println("Started process:  -->  ")
+	}
 
 	ctx := srv.Context()
 
@@ -51,19 +54,20 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 		if err != nil {
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
-
-		log.Println(" ")
-		log.Println(" ")
-		log.Println("Got stream:  -->  ")
+		if s.Verbose {
+			log.Println(" ")
+			log.Println(" ")
+			log.Println("Got stream:  -->  ")
+		}
 
 		resp := &extProcPb.ProcessingResponse{}
 		switch v := req.Request.(type) {
 		case *extProcPb.ProcessingRequest_RequestHeaders:
-			resp = HandleRequestHeaders(req)
+			resp = HandleRequestHeaders(req, s.Verbose)
 		case *extProcPb.ProcessingRequest_RequestBody:
-			resp = HandleRequestBody(req, s.Pods, s.PodIPMap, s.IpPodMap, s.CacheActiveLoraModel, s.CachePendingRequestActiveAdapters, s.CachePodModelMetrics, s.LRUCacheLLMRequests, s.PQ, s.PriorityMap, s.MaxAllowedKVCachePerc, s.RedisPQManager)
+			resp = HandleRequestBody(req, s.Pods, s.PodIPMap, s.IpPodMap, s.CacheActiveLoraModel, s.CachePendingRequestActiveAdapters, s.CachePodModelMetrics, s.LRUCacheLLMRequests, s.PriorityMap, s.MaxAllowedKVCachePerc, s.WFQScheduler, s.Verbose)
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
-			resp = HandleResponseHeaders(req, s.Pods, s.IpPodMap, s.CacheActiveLoraModel, s.CachePendingRequestActiveAdapters, s.LRUCacheLLMRequests)
+			resp = HandleResponseHeaders(req, s.Pods, s.IpPodMap, s.CacheActiveLoraModel, s.CachePendingRequestActiveAdapters, s.LRUCacheLLMRequests, s.Verbose)
 		default:
 			log.Printf("Unknown Request type %+v\n", v)
 		}

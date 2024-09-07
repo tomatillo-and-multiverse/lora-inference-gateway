@@ -1,3 +1,5 @@
+// Remove the duplicate module declaration
+
 package main
 
 import (
@@ -17,7 +19,6 @@ import (
 	"ext-proc/handlers"
 	"ext-proc/metrics"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/hashicorp/golang-lru/v2/expirable"
 
 	rpq "ext-proc/redispriorityqueue"
@@ -46,9 +47,8 @@ var (
 	ipPodMap                          map[string]string
 	interval                          = 30 * time.Second // Update interval for fetching metrics
 	TTL                               = int64(7)
-	pq                                *rpq.RedisPriorityQueue
+	wfqScheduler                      *rpq.WFQScheduler
 	priorityMap                       map[string]int
-	redisPriorityQueueManager         *rpq.RedisPriorityQueueManager
 )
 
 type healthServer struct{}
@@ -63,10 +63,17 @@ func (s *healthServer) Watch(in *healthPb.HealthCheckRequest, srv healthPb.Healt
 }
 
 func main() {
+	verbose := false
 	flag.IntVar(&port, "port", 9002, "gRPC port")
 	flag.StringVar(&certPath, "certPath", "", "path to extProcServer certificate and private key")
 	podsFlag := flag.String("pods", "", "Comma-separated list of pod addresses")
 	podIPsFlag := flag.String("podIPs", "", "Comma-separated list of pod IPs")
+	verboseFlag := flag.String("verbose", "False", "Is verbose")
+
+	if strings.ToLower(*verboseFlag) == "true" {
+		verbose := true
+		log.Printf("Verbose: %v", verbose)
+	}
 	maxAllowedKVCachePercent := flag.Float64("maxAllowedKVCachePercent", 0.8, "Max allowed percentage of cache to be used")
 	flag.Parse()
 
@@ -90,10 +97,7 @@ func main() {
 		ipPodMap[podIPs[i]] = pods[i]
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr: "redis:6379", // Use the Redis service name in Kubernetes
-	})
-	pq = rpq.NewRedisPriorityQueue(rdb, "my_priority_queue")
+	wfqScheduler = rpq.NewWFQScheduler()
 
 	priorityMap = map[string]int{
 		"tweet-summary": 1,
@@ -102,15 +106,14 @@ func main() {
 	// cache init
 	cacheActiveLoraModel = freecache.NewCache(1024)
 	cachePendingRequestActiveAdapters = freecache.NewCache(1024)
-	lrucacheLLMRequests := expirable.NewLRU[string, cache.LLMRequest](1024*1024*1024, nil, time.Second*600)
+	lrucacheLLMRequests = expirable.NewLRU[string, cache.LLMRequest](1024*1024*1024, nil, time.Second*600)
 	cachePodModelMetrics = freecache.NewCache(1024)
-	redisPriorityQueueManager = rpq.NewRedisPriorityQueueManager(lrucacheLLMRequests, pq)
 
 	debug.SetGCPercent(20)
 
 	// Start the periodic metrics fetching in a separate goroutine
 
-	go metrics.FetchMetricsPeriodically(pods, podIPMap, cacheActiveLoraModel, cachePendingRequestActiveAdapters, interval)
+	go metrics.FetchMetricsPeriodically(pods, podIPMap, cacheActiveLoraModel, cachePendingRequestActiveAdapters, interval, verbose)
 	//qc.Start()
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
@@ -128,10 +131,10 @@ func main() {
 		CachePendingRequestActiveAdapters: cachePendingRequestActiveAdapters,
 		LRUCacheLLMRequests:               lrucacheLLMRequests,
 		CachePodModelMetrics:              cachePodModelMetrics,
-		PQ:                                pq,
 		PriorityMap:                       priorityMap,
-		RedisPQManager:                    redisPriorityQueueManager,
+		WFQScheduler:                      wfqScheduler,
 		MaxAllowedKVCachePerc:             *maxAllowedKVCachePercent,
+		Verbose:                           verbose,
 	})
 	healthPb.RegisterHealthServer(s, &healthServer{})
 

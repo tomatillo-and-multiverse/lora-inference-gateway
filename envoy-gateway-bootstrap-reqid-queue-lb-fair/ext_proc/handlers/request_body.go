@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"github.com/coocood/freecache"
@@ -20,23 +21,46 @@ import (
 
 var targetTokensSentPerSec = 0.0
 
-func Schedule(reqID string, redisPQManager pQueue.RedisPriorityQueueManager, podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, maxAllowedKVCachePerc float64, useCase string, priority int, weight float64) {
-	item := redisPQManager.CreateItem(reqID, podUseCaseMetricsMap, useCase, priority, weight)
-	err := redisPQManager.AddItemToQueue(item)
-	if err != nil {
-		log.Printf("Error adding item to queue: %v", err)
+func Schedule(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, maxAllowedKVCachePerc float64, reqID string, wfqScheduler *pQueue.WFQScheduler, useCase string, latency float64) error {
+	item := &pQueue.Item{
+		ID:                reqID,
+		VirtualLatency:    latency,
+		ArrivalTime:       0,
+		VirtualTime:       0,
+		VirtualFinishTime: 0,
+		UseCase:           useCase,
 	}
-	isTop, err := redisPQManager.WaitForTopItem(item)
-	if err != nil {
-		log.Printf("Error waiting for top item: %v", err)
+	wfqScheduler.Receive(item)
+	total_wait_time := 0.0
+
+	for {
+
+		if total_wait_time > 300 {
+			return fmt.Errorf("request %s not scheduled reached timeout", reqID)
+		}
+		if !metrics.IsCapacityAvailable(podUseCaseMetricsMap, maxAllowedKVCachePerc) {
+			time.Sleep(1 * time.Second)
+			total_wait_time += 1
+		} else {
+			topItemID := wfqScheduler.Peek()
+			if topItemID == reqID {
+				_ = wfqScheduler.Send()
+				log.Printf("Request %s of useCase %s scheduled after %v sex", reqID, useCase, total_wait_time)
+				return nil
+			} else {
+				time.Sleep(1 * time.Second)
+				total_wait_time += 1
+			}
+		}
+
 	}
-	if isTop {
-		log.Printf("Item is at the top of the queue")
-	}
+
 }
 
-func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap map[string]string, ipPodMap map[string]string, cacheActiveLoraModel, cachePendingRequestActiveAdapters, cachePodModelMetrics *freecache.Cache, lruCacheLLMRequests *expirable.LRU[string, cache.LLMRequest], pq *pQueue.RedisPriorityQueue, priorityMap map[string]int, maxAllowedKVCachePerc float64, redisPQManager *pQueue.RedisPriorityQueueManager) *extProcPb.ProcessingResponse {
-	log.Println("--- In RequestBody processing")
+func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap map[string]string, ipPodMap map[string]string, cacheActiveLoraModel, cachePendingRequestActiveAdapters, cachePodModelMetrics *freecache.Cache, lruCacheLLMRequests *expirable.LRU[string, cache.LLMRequest], priorityMap map[string]int, maxAllowedKVCachePerc float64, redisPQManager *pQueue.WFQScheduler, verbose bool) *extProcPb.ProcessingResponse {
+	if verbose {
+		log.Println("--- In RequestBody processing")
+	}
 
 	var requestBody map[string]interface{}
 	v := req.Request.(*extProcPb.ProcessingRequest_RequestBody)
@@ -45,29 +69,32 @@ func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap
 	targetPod := ""
 
 	if err := json.Unmarshal(v.RequestBody.Body, &requestBody); err != nil {
-		log.Printf("Error unmarshaling request body: %v", err)
+		err = fmt.Errorf("error unmarshaling request body: %v", err)
+		log.Println(err)
 		return nil
 	}
 
 	modelRequested, ok := requestBody["model"].(string)
 	if !ok {
-		log.Println("model/lora-adapter not found in request body")
+		err := fmt.Errorf("model not found in request body")
+		log.Println(err)
 		return nil
 	}
 
 	max_tokens, ok := requestBody["max_tokens"].(float64)
 	if !ok {
-		log.Println("max_tokens not found in request body")
 		max_tokens = 16 // default value for vLLM hardcoded
 	}
 	prompt_len, ok := requestBody["prompt_len"].(float64)
 	if !ok {
-		log.Println("prompt_len not found in request body")
+		err := fmt.Errorf("prompt_len not found in request body")
+		log.Println(err)
 		return nil
 	}
 	use_case, ok := requestBody["use_case"].(string)
 	if !ok {
-		log.Println("use_case not found in request body")
+		err := fmt.Errorf("use_case not found in request body")
+		log.Println(err)
 		return nil
 	}
 
@@ -93,7 +120,9 @@ func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap
 		baseModel = baseModelFromCache
 		if err == nil {
 			if modelRequested != baseModel {
-				fmt.Printf("Base model: %s requested", baseModel)
+				if verbose {
+					fmt.Printf("Base model: %s requested", baseModel)
+				}
 				loraAdapterRequested = modelRequested
 				break
 			}
@@ -118,26 +147,50 @@ func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap
 		llmRequest, ok := cache.GetLRUCacheLLMRequest(lruCacheLLMRequests, reqID)
 		if ok {
 			llmRequests = append(llmRequests, *llmRequest)
-			//fmt.Printf("fetched ip for req %s\n", reqID)
+			if verbose {
+				fmt.Printf("fetched ip for req %s\n", reqID)
+			}
 		} else {
-			//log.Printf("Error fetching llmRequest for %s", reqID)
+			log.Printf("Error fetching llmRequest for %s", reqID)
 		}
 	}
 
-	fmt.Printf("Fetched loraMetrics: %+v\n", loraMetrics)
-	fmt.Printf("Fetched requestMetrics: %+v\n", requestMetrics)
+	if verbose {
+		fmt.Printf("Fetched loraMetrics: %+v\n", loraMetrics)
+		fmt.Printf("Fetched requestMetrics: %+v\n", requestMetrics)
+	}
 
 	podUseCaseMetricsMap := metrics.UpdatePodUseCaseMetrics(requestMetrics, llmRequests, cachePodModelMetrics, use_case, loraAdapterRequested, baseModel)
 
 	if !metrics.IsCapacityAvailable(podUseCaseMetricsMap, maxAllowedKVCachePerc) {
-		//Schedule(requestID, *redisPQManager, podUseCaseMetricsMap, maxAllowedKVCachePerc, use_case, priorityMap[use_case], 0)
 		log.Printf("Capacity not available for use case %s", use_case)
+		raw_weight := math.MaxFloat64
+		if use_case == "high-priority" {
+			raw_weight = 1.0
+		}
+		latency := raw_weight
+		if err := Schedule(podUseCaseMetricsMap, maxAllowedKVCachePerc, requestID, redisPQManager, use_case, latency); err != nil {
+			resp := &extProcPb.ProcessingResponse{
+				Response: &extProcPb.ProcessingResponse_ImmediateResponse{
+					ImmediateResponse: &extProcPb.ImmediateResponse{
+						Status: &envoyTypePb.HttpStatus{
+							Code: envoyTypePb.StatusCode_TooManyRequests,
+						},
+					},
+				},
+			}
+			return resp
+
+		}
 	}
 
-	targetPod = metrics.FindTargetPod(loraMetrics, requestMetrics, llmRequests, podUseCaseMetricsMap, loraAdapterRequested, use_case, baseModel, targetTokensSentPerSec, maxAllowedKVCachePerc)
+	targetPod = metrics.FindTargetPod(loraMetrics, requestMetrics, llmRequests, podUseCaseMetricsMap, loraAdapterRequested, use_case, baseModel, targetTokensSentPerSec, maxAllowedKVCachePerc, verbose)
 	targetPodIP = podIPMap[targetPod]
-	fmt.Printf("Selected target pod: %s\n", targetPod)
-	fmt.Printf("Selected target pod IP: %s\n", targetPodIP)
+	if verbose {
+
+		fmt.Printf("Selected target pod: %s\n", targetPod)
+		fmt.Printf("Selected target pod IP: %s\n", targetPodIP)
+	}
 
 	var resp *extProcPb.ProcessingResponse
 	if !metrics.Contains(pods, targetPod) {
@@ -184,8 +237,10 @@ func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap
 			},
 		}
 		// Print headers being set
-		for _, header := range headers {
-			fmt.Printf("[request_body] Header Key: %s, Header Value: %s\n", header.Header.Key, string(header.Header.RawValue))
+		if verbose {
+			for _, header := range headers {
+				fmt.Printf("[request_body] Header Key: %s, Header Value: %s\n", header.Header.Key, string(header.Header.RawValue))
+			}
 		}
 	}
 	llmRequestMetric := cache.LLMRequest{
