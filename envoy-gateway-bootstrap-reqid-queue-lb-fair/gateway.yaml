@@ -37,6 +37,8 @@ spec:
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                       stat_prefix: http
+                      common_http_protocol_options:
+                          idle_timeout: 3599s
                       codec_type: AUTO
                       route_config:
                         name: local_route
@@ -55,7 +57,7 @@ spec:
                                       present_match: true
                                 route:
                                   cluster: original_destination_cluster
-                                  timeout: 1000s
+                                  timeout: 3599s
                                 typed_per_filter_config:
                                   envoy.filters.http.ext_proc:
                                     "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExtProcPerRoute
@@ -64,7 +66,7 @@ spec:
                                   prefix: "/"
                                 route:  
                                   cluster: original_destination_cluster
-                                  timeout: 1000s
+                                  timeout: 3599s
                       http_filters:
                         - name: envoy.filters.http.ext_proc
                           typed_config:
@@ -73,7 +75,7 @@ spec:
                             grpc_service:
                               envoy_grpc:
                                 cluster_name: ext_proc_cluster
-                            message_timeout: 1000s
+                            message_timeout: 3599s
                             processing_mode:
                               request_header_mode: "SEND"
                               response_header_mode: "SEND"
@@ -90,14 +92,30 @@ spec:
             original_dst_lb_config:
               use_http_header: true
               http_header_name: "target-pod"
-            connect_timeout: 6s
+            connect_timeout: 3599s
             lb_policy: CLUSTER_PROVIDED
             dns_lookup_family: V4_ONLY
+            circuit_breakers:
+              thresholds:
+                - priority: DEFAULT
+                  max_connections: 10000
+                  max_pending_requests: 10000
+                  max_requests: 10000
+            common_http_protocol_options:
+              idle_timeout: 3599s
           - name: ext_proc_cluster
-            connect_timeout: 1000s
+            connect_timeout: 3599s
             type: LOGICAL_DNS
+            common_http_protocol_options:
+              idle_timeout: 3599s
             http2_protocol_options: {}
             lb_policy: ROUND_ROBIN
+            circuit_breakers:
+              thresholds:
+                - priority: DEFAULT
+                  max_connections: 10000
+                  max_pending_requests: 10000
+                  max_requests: 10000
             load_assignment:
               cluster_name: ext_proc_cluster
               endpoints:
@@ -130,3 +148,4 @@ spec:
     - name: http
       protocol: HTTP
       port: 8080
+

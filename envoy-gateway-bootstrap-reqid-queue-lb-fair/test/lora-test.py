@@ -22,7 +22,7 @@ models = [
 ]
 
 model_map = {
-    "34.126.139.141": models,
+    "35.240.215.93": models,
 }
 
 def create_json(ip: str, model: str = None) -> dict:
@@ -61,7 +61,7 @@ async def parallelized_benchmarking(session: aiohttp.ClientSession, ip: str, mod
         metrics["server_disconnected"] += 1
 
 def ips(n_reqs: int):
-    available_ips = ["34.126.139.141"]
+    available_ips = ["35.240.215.93"]
     for _ in range(n_reqs):
         yield random.choice(available_ips)
 

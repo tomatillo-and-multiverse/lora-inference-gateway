@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"time"
 
 	"github.com/coocood/freecache"
@@ -16,48 +15,12 @@ import (
 
 	"ext-proc/cache"
 	metrics "ext-proc/metrics"
-	pQueue "ext-proc/redispriorityqueue"
 )
 
 var targetTokensSentPerSec = 0.0
+var timeout = 300
 
-func Schedule(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, maxAllowedKVCachePerc float64, reqID string, wfqScheduler *pQueue.WFQScheduler, useCase string, latency float64) error {
-	item := &pQueue.Item{
-		ID:                reqID,
-		VirtualLatency:    latency,
-		ArrivalTime:       0,
-		VirtualTime:       0,
-		VirtualFinishTime: 0,
-		UseCase:           useCase,
-	}
-	wfqScheduler.Receive(item)
-	total_wait_time := 0.0
-
-	for {
-
-		if total_wait_time > 300 {
-			return fmt.Errorf("request %s not scheduled reached timeout", reqID)
-		}
-		if !metrics.IsCapacityAvailable(podUseCaseMetricsMap, maxAllowedKVCachePerc) {
-			time.Sleep(1 * time.Second)
-			total_wait_time += 1
-		} else {
-			topItemID := wfqScheduler.Peek()
-			if topItemID == reqID {
-				_ = wfqScheduler.Send()
-				log.Printf("Request %s of useCase %s scheduled after %v sex", reqID, useCase, total_wait_time)
-				return nil
-			} else {
-				time.Sleep(1 * time.Second)
-				total_wait_time += 1
-			}
-		}
-
-	}
-
-}
-
-func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap map[string]string, ipPodMap map[string]string, cacheActiveLoraModel, cachePendingRequestActiveAdapters, cachePodModelMetrics *freecache.Cache, lruCacheLLMRequests *expirable.LRU[string, cache.LLMRequest], priorityMap map[string]int, maxAllowedKVCachePerc float64, redisPQManager *pQueue.WFQScheduler, verbose bool) *extProcPb.ProcessingResponse {
+func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap map[string]string, ipPodMap map[string]string, cacheActiveLoraModel, cachePendingRequestActiveAdapters *freecache.Cache, lruCacheLLMRequests, queuedRequests *expirable.LRU[string, cache.LLMRequest], poppedRequests *freecache.Cache, maxAllowedKVCachePerc float64, MaxTokensPerPod float64, verbose bool) *extProcPb.ProcessingResponse {
 	if verbose {
 		log.Println("--- In RequestBody processing")
 	}
@@ -142,34 +105,46 @@ func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap
 		}
 	}
 
-	var llmRequests []cache.LLMRequest
-	for _, reqID := range lruCacheLLMRequests.Keys() {
-		llmRequest, ok := cache.GetLRUCacheLLMRequest(lruCacheLLMRequests, reqID)
-		if ok {
-			llmRequests = append(llmRequests, *llmRequest)
-			if verbose {
-				fmt.Printf("fetched ip for req %s\n", reqID)
-			}
-		} else {
-			log.Printf("Error fetching llmRequest for %s", reqID)
-		}
-	}
-
 	if verbose {
 		fmt.Printf("Fetched loraMetrics: %+v\n", loraMetrics)
 		fmt.Printf("Fetched requestMetrics: %+v\n", requestMetrics)
 	}
 
-	podUseCaseMetricsMap := metrics.UpdatePodUseCaseMetrics(requestMetrics, llmRequests, cachePodModelMetrics, use_case, loraAdapterRequested, baseModel)
-
-	if !metrics.IsCapacityAvailable(podUseCaseMetricsMap, maxAllowedKVCachePerc) {
-		log.Printf("Capacity not available for use case %s", use_case)
-		raw_weight := math.MaxFloat64
-		if use_case == "high-priority" {
-			raw_weight = 1.0
+	podUseCaseMetricsMap := metrics.GetPodUseCaseMetrics(pods, cachePendingRequestActiveAdapters, lruCacheLLMRequests, use_case, loraAdapterRequested, verbose)
+	max_tokens_allowed := int(MaxTokensPerPod * float64(len(pods))) // 2810 * 16 is the max tokens  per pod
+	if metrics.TotalPendingTokens(lruCacheLLMRequests) > max_tokens_allowed {
+		log.Printf("Capacity not available for reqID %s  use case %s", requestID, use_case)
+		llmRequestMetric := cache.LLMRequest{
+			IP:                  "",
+			PodName:             "",
+			SentTime:            "",
+			ReceivedTime:        "",
+			ReqID:               requestID,
+			TokensSent:          int(prompt_len),
+			TokensReceived:      0,
+			TokensPending:       int(max_tokens) + int(prompt_len),
+			ModelName:           "",
+			BaseModel:           "",
+			E2ELatencyInSec:     0.0,
+			PrefillLatencyInSec: 0.0,
+			UseCase:             use_case,
 		}
-		latency := raw_weight
-		if err := Schedule(podUseCaseMetricsMap, maxAllowedKVCachePerc, requestID, redisPQManager, use_case, latency); err != nil {
+		log.Printf("Adding request to queuedRequests for reqID %s", requestID)
+		queuedRequests.Add(requestID, llmRequestMetric)
+
+		time_in_queue := 0
+		for {
+			_, err := poppedRequests.Get([]byte(requestID))
+			if err == nil {
+				break
+			}
+			time.Sleep(1 * time.Second)
+			time_in_queue += 1
+			if time_in_queue > timeout {
+				break
+			}
+		}
+		if time_in_queue > timeout {
 			resp := &extProcPb.ProcessingResponse{
 				Response: &extProcPb.ProcessingResponse_ImmediateResponse{
 					ImmediateResponse: &extProcPb.ImmediateResponse{
@@ -184,7 +159,7 @@ func HandleRequestBody(req *extProcPb.ProcessingRequest, pods []string, podIPMap
 		}
 	}
 
-	targetPod = metrics.FindTargetPod(loraMetrics, requestMetrics, llmRequests, podUseCaseMetricsMap, loraAdapterRequested, use_case, baseModel, targetTokensSentPerSec, maxAllowedKVCachePerc, verbose)
+	targetPod = metrics.FindTargetPod(loraMetrics, requestMetrics, podUseCaseMetricsMap, loraAdapterRequested, use_case, baseModel, targetTokensSentPerSec, maxAllowedKVCachePerc, verbose)
 	targetPodIP = podIPMap[targetPod]
 	if verbose {
 

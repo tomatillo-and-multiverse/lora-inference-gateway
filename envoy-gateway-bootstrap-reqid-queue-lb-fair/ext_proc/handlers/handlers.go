@@ -14,7 +14,6 @@ import (
 	"github.com/coocood/freecache"
 
 	"ext-proc/cache"
-	"ext-proc/redispriorityqueue"
 )
 
 type Server struct {
@@ -25,9 +24,10 @@ type Server struct {
 	CachePendingRequestActiveAdapters *freecache.Cache
 	LRUCacheLLMRequests               *expirable.LRU[string, cache.LLMRequest]
 	CachePodModelMetrics              *freecache.Cache
-	PriorityMap                       map[string]int
-	WFQScheduler                      *redispriorityqueue.WFQScheduler
+	QueuedRequests                    *expirable.LRU[string, cache.LLMRequest]
+	PoppedRequests                    *freecache.Cache
 	MaxAllowedKVCachePerc             float64
+	MaxTokensPerPod                   float64
 	Verbose                           bool
 }
 
@@ -65,7 +65,7 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 		case *extProcPb.ProcessingRequest_RequestHeaders:
 			resp = HandleRequestHeaders(req, s.Verbose)
 		case *extProcPb.ProcessingRequest_RequestBody:
-			resp = HandleRequestBody(req, s.Pods, s.PodIPMap, s.IpPodMap, s.CacheActiveLoraModel, s.CachePendingRequestActiveAdapters, s.CachePodModelMetrics, s.LRUCacheLLMRequests, s.PriorityMap, s.MaxAllowedKVCachePerc, s.WFQScheduler, s.Verbose)
+			resp = HandleRequestBody(req, s.Pods, s.PodIPMap, s.IpPodMap, s.CacheActiveLoraModel, s.CachePendingRequestActiveAdapters, s.LRUCacheLLMRequests, s.QueuedRequests, s.PoppedRequests, s.MaxAllowedKVCachePerc, s.MaxTokensPerPod, s.Verbose)
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
 			resp = HandleResponseHeaders(req, s.Pods, s.IpPodMap, s.CacheActiveLoraModel, s.CachePendingRequestActiveAdapters, s.LRUCacheLLMRequests, s.Verbose)
 		default:

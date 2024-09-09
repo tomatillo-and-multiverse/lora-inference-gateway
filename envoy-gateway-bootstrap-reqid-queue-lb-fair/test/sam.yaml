@@ -8,6 +8,6 @@ spec:
       containers:
       - name: python
         image: us-docker.pkg.dev/kaushikmitra-gke-dev/kaushikmitra-docker-repo/lb_script:latest
-        command: ["python", "qps-test.py", "--tokenizer", "meta-llama/Llama-2-7b-hf", "--dataset", "ShareGPT_V3_unfiltered_cleaned_split.json", "--num-prompts", "1500", "--request-rate", "100"]
+        command: ["python", "qps-test.py", "--tokenizer", "meta-llama/Llama-2-7b-hf", "--dataset", "ShareGPT_V3_unfiltered_cleaned_split.json", "--num-prompts", "2000", "--request-rate", "140"]
       restartPolicy: Never
   backoffLimit: 4

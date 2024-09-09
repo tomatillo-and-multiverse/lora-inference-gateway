@@ -1,168 +1,346 @@
 package redispriorityqueue
 
 import (
+	"fmt"
+	"log"
 	"math"
+	"math/rand"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
 
-// TestNewWFQScheduler tests the initialization of a new WFQScheduler.
-func TestNewWFQScheduler(t *testing.T) {
-	wfq := NewWFQScheduler()
-	if wfq == nil {
-		t.Fatal("Expected non-nil WFQScheduler")
-	}
-	if len(wfq.queues) != 0 {
-		t.Fatalf("Expected no queues, got %d", len(wfq.queues))
-	}
+func (i *item) String() string {
+	return fmt.Sprintf("{%d %d %d %d %s}", i.key, i.size, i.weight, i.seq, i.id)
 }
 
-// TestReceive tests the addition of items to the scheduler.
-func TestReceive(t *testing.T) {
-	wfq := NewWFQScheduler()
+type flowDesc struct {
+	// In
+	ftotal uint64 // Total units in flow
+	imin   uint64 // Min item size
+	imax   uint64 // Max item size
+	weight uint8  // Flow weight
 
-	item1 := &Item{
-		ID:             "item1",
-		VirtualLatency: 10,
-		UseCase:        "test",
-	}
-
-	wfq.Receive(item1)
-
-	if wfq.queues["test"] == nil {
-		t.Fatal("Expected queue for use case 'test' to be initialized")
-	}
-
-	if wfq.queues["test"].Len() != 1 {
-		t.Fatalf("Expected queue length of 1, got %d", wfq.queues["test"].Len())
-	}
-
-	if (*wfq.queues["test"])[0].ID != "item1" {
-		t.Fatalf("Expected item ID 'item1', got %s", (*wfq.queues["test"])[0].ID)
-	}
+	// Out
+	idealPercent  float64
+	actualPercent float64
 }
 
-// TestSend tests the removal of items from the scheduler.
-func TestSend(t *testing.T) {
-	wfq := NewWFQScheduler()
-
-	item1 := &Item{
-		ID:             "item1",
-		VirtualLatency: 10,
-		UseCase:        "test",
-	}
-	item2 := &Item{
-		ID:             "item2",
-		VirtualLatency: 5,
-		UseCase:        "test",
-	}
-
-	wfq.Receive(item1)
-	wfq.Receive(item2)
-
-	sentItem := wfq.Send()
-
-	if sentItem == nil {
-		t.Fatal("Expected non-nil item to be sent")
-	}
-
-	if sentItem.ID != "item1" && sentItem.ID != "item2" {
-		t.Fatalf("Unexpected item ID: %s", sentItem.ID)
-	}
-
-	// Verify that one item is left in the queue
-	if wfq.queues["test"].Len() != 1 {
-		t.Fatalf("Expected queue length of 1 after sending one item, got %d", wfq.queues["test"].Len())
-	}
-
-	//check if the item sent is the one with the lowest virtual finish time
-	//see which item has the lowest virtual finish time
-	if item1.VirtualFinishTime < item2.VirtualFinishTime {
-		if sentItem.ID != "item1" {
-			t.Fatalf("Expected item1 to be sent, got %s", sentItem.ID)
+func genFlow(queue *Queue, desc *flowDesc, key uint64, done_wg *sync.WaitGroup) {
+	for i, t := uint64(1), uint64(0); t < desc.ftotal; i++ {
+		//time.Sleep(time.Microsecond)
+		it := new(item)
+		it.key = key
+		it.id = fmt.Sprintf("%d", i)
+		if desc.imin == desc.imax {
+			it.size = desc.imax
+		} else {
+			it.size = desc.imin + uint64(rand.Int63n(int64(desc.imax-desc.imin)))
 		}
-	} else {
-		if sentItem.ID != "item2" {
-			t.Fatalf("Expected item2 to be sent, got %s", sentItem.ID)
+		if t+it.size > desc.ftotal {
+			it.size = desc.ftotal - t
+		}
+		t += it.size
+		it.weight = desc.weight
+		it.seq = i
+		queue.Queue(it)
+	}
+	(*done_wg).Done()
+}
+
+func consumeQueue(queue *Queue, descs []flowDesc) (float64, error) {
+	active := make(map[uint64]bool)
+	var total uint64
+	acnt := make(map[uint64]uint64)
+	cnt := make(map[uint64]uint64)
+	seqs := make(map[uint64]uint64)
+
+	var wsum uint64
+	for _, d := range descs {
+		wsum += uint64(d.weight + 1)
+	}
+	for i, ok := queue.PeekOrDeQueue(true); ok; i, ok = queue.PeekOrDeQueue(true) {
+		log.Printf("Top Item: %s", i.(*item).String())
+	}
+	for i, ok := queue.PeekOrDeQueue(true); ok; i, ok = queue.PeekOrDeQueue(true) {
+		time.Sleep(time.Microsecond) // Simulate constrained bandwidth
+		it := i.(*item)
+		seq := seqs[it.key]
+		if seq+1 != it.seq {
+			return 0, fmt.Errorf("Item for flow %d came out of queue out-of-order: expected %d, got %d", it.key, seq+1, it.seq)
+		}
+		seqs[it.key] = it.seq
+
+		if cnt[it.key] == 0 {
+			active[it.key] = true
+		}
+		cnt[it.key] += it.size
+
+		if len(active) == len(descs) {
+			acnt[it.key] += it.size
+			total += it.size
+		}
+
+		if cnt[it.key] == descs[it.key].ftotal {
+			delete(active, it.key)
 		}
 	}
 
+	var variance float64
+	for key := uint64(0); key < uint64(len(descs)); key++ {
+		descs[key].idealPercent = (((float64(total) * float64(descs[key].weight+1)) / float64(wsum)) / float64(total)) * 100
+		descs[key].actualPercent = (float64(acnt[key]) / float64(total)) * 100
+		x := descs[key].idealPercent - descs[key].actualPercent
+		x *= x
+		variance += x
+	}
+
+	stdDev := math.Sqrt(variance)
+	return stdDev, nil
 }
 
-// TestPeek tests the peek functionality of the scheduler.
-func TestPeek(t *testing.T) {
-	wfq := NewWFQScheduler()
+func TestSingleFlow(t *testing.T) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	wfq := NewQueue(1000, 10, &helper{})
 
-	item1 := &Item{
-		ID:             "item1",
-		VirtualLatency: 10,
-		UseCase:        "test",
-	}
+	go func() {
+		for i := 1; i < 10000; i++ {
+			it := new(item)
+			it.key = 1
+			it.size = uint64(rand.Int63n(10) + 1)
+			it.weight = 1
+			it.seq = uint64(i)
+			wfq.Queue(it)
+		}
+		wfq.Close()
+	}()
 
-	wfq.Receive(item1)
-
-	peekedID := wfq.Peek()
-
-	if peekedID != "item1" {
-		t.Fatalf("Expected peeked ID 'item1', got %s", peekedID)
-	}
-
-	// Verify that peek does not remove the item
-	if wfq.queues["test"].Len() != 1 {
-		t.Fatalf("Expected queue length of 1 after peeking, got %d", wfq.queues["test"].Len())
-	}
-}
-
-// TestSelectUseCase tests the selection logic of use cases with the lowest virtual finish time.
-func TestSelectUseCase(t *testing.T) {
-	wfq := NewWFQScheduler()
-
-	item1 := &Item{
-		ID:             "item1",
-		VirtualLatency: 10,
-		UseCase:        "test1",
-	}
-
-	item2 := &Item{
-		ID:             "item2",
-		VirtualLatency: 5,
-		UseCase:        "test2",
-	}
-
-	wfq.Receive(item1)
-	wfq.Receive(item2)
-
-	selectedUseCase := wfq.selectUseCase()
-
-	if selectedUseCase != "test2" {
-		t.Fatalf("Expected selected use case 'test2', got %s", selectedUseCase)
+	var seq uint64
+	for it, ok := wfq.PeekOrDeQueue(true); ok; it, ok = wfq.PeekOrDeQueue(true) {
+		if seq+1 != it.(*item).seq {
+			t.Fatalf("Item came out of queue out-of-order: expected %d, got %d", seq+1, it.(*item).seq)
+		}
+		seq = it.(*item).seq
 	}
 }
 
-// Helper function to compare floating-point numbers within a tolerance.
-func floatEquals(a, b, tolerance float64) bool {
-	return math.Abs(a-b) <= tolerance
+func TestUniformMultiFlow(t *testing.T) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	wfq := NewQueue(1000, 10, &helper{})
+
+	var swg sync.WaitGroup
+	var wg sync.WaitGroup
+	var flows = []flowDesc{
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+	}
+
+	swg.Add(1)
+	wg.Add(len(flows))
+	for n := 0; n < len(flows); n++ {
+		go genFlow(wfq, &flows[n], uint64(n), &wg)
+	}
+
+	go func() {
+		wg.Wait()
+		wfq.Close()
+	}()
+	swg.Done()
+
+	stdDev, err := consumeQueue(wfq, flows)
+
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	if stdDev > 0.1 {
+		for k, d := range flows {
+			t.Logf("For flow %d: Expected %v%%, got %v%%", k, d.idealPercent, d.actualPercent)
+		}
+		t.Fatalf("StdDev was expected to be < 0.1 but got %v", stdDev)
+	}
 }
 
-// TestUpdateTime tests the update time functionality.
-func TestUpdateTime(t *testing.T) {
-	wfq := NewWFQScheduler()
-	item := &Item{
-		ID:             "item1",
-		VirtualLatency: 10,
-		UseCase:        "test",
+func TestUniformMultiFlowWithRandomItemSize(t *testing.T) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	wfq := NewQueue(1000, 20, &helper{})
+
+	var swg sync.WaitGroup
+	var wg sync.WaitGroup
+	var flows = []flowDesc{
+		// ftotal, imin, imax, weight, ideal, actual
+		{10000, 1, 10, 0, 0, 0},
+		{10000, 1, 10, 0, 0, 0},
+		{10000, 1, 10, 0, 0, 0},
+		{10000, 1, 10, 0, 0, 0},
+		{10000, 1, 10, 0, 0, 0},
+		{10000, 1, 10, 0, 0, 0},
+		{10000, 1, 10, 0, 0, 0},
+		{10000, 1, 10, 0, 0, 0},
+		{10000, 1, 10, 0, 0, 0},
+		{10000, 1, 10, 0, 0, 0},
 	}
 
-	// Capture current time
-	now := float64(time.Now().UnixNano()) / 1e9
-
-	wfq.updateTime(item, item.UseCase)
-
-	if !floatEquals(item.ArrivalTime, now, 1e-3) {
-		t.Fatalf("Expected arrival time to be approximately %f, got %f", now, item.ArrivalTime)
+	swg.Add(1)
+	wg.Add(len(flows))
+	for n := 0; n < len(flows); n++ {
+		go genFlow(wfq, &flows[n], uint64(n), &wg)
 	}
 
-	if item.VirtualFinishTime != item.VirtualTime+float64(item.VirtualLatency) {
-		t.Fatalf("Expected virtual finish time %f, got %f", item.VirtualTime+float64(item.VirtualLatency), item.VirtualFinishTime)
+	go func() {
+		wg.Wait()
+		wfq.Close()
+	}()
+	swg.Done()
+
+	stdDev, err := consumeQueue(wfq, flows)
+
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	if stdDev > 0.1 {
+		for k, d := range flows {
+			t.Logf("For flow %d: Expected %v%%, got %v%%", k, d.idealPercent, d.actualPercent)
+		}
+		t.Fatalf("StdDev was expected to be < 0.1 but got %v", stdDev)
+	}
+}
+
+func TestMultiFlowWithOneHiPriFlow(t *testing.T) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	wfq := NewQueue(1000, 10, &helper{})
+
+	var swg sync.WaitGroup
+	var wg sync.WaitGroup
+	var flows = []flowDesc{
+		{10000, 1, 1, 32, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+		{1000, 1, 1, 0, 0, 0},
+	}
+
+	swg.Add(1)
+	wg.Add(len(flows))
+	for n := 0; n < len(flows); n++ {
+		go genFlow(wfq, &flows[n], uint64(n), &wg)
+	}
+
+	go func() {
+		wg.Wait()
+		wfq.Close()
+	}()
+	swg.Done()
+
+	stdDev, err := consumeQueue(wfq, flows)
+
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	if stdDev > 0.1 {
+		for k, d := range flows {
+			t.Logf("For flow %d: Expected %v%%, got %v%%", k, d.idealPercent, d.actualPercent)
+		}
+		t.Fatalf("StdDev was expected to be < 0.1 but got %v", stdDev)
+	}
+}
+
+func TestMixedWeightMultiFlowWithRandomItemSize(t *testing.T) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	wfq := NewQueue(1000, 20, &helper{})
+
+	var swg sync.WaitGroup
+	var wg sync.WaitGroup
+	var flows = []flowDesc{
+		// ftotal, imin, imax, weight, ideal, actual
+		{10000, 1, 10, 1, 0, 0},
+		{10000, 1, 10, 10, 0, 0},
+		{10000, 1, 10, 3, 0, 0},
+		{10000, 1, 10, 1, 0, 0},
+		{10000, 1, 10, 1, 0, 0},
+		{10000, 1, 10, 4, 0, 0},
+		{10000, 1, 10, 1, 0, 0},
+		{10000, 1, 10, 1, 0, 0},
+		{10000, 1, 10, 7, 0, 0},
+		{10000, 1, 10, 1, 0, 0},
+	}
+
+	swg.Add(1)
+	wg.Add(len(flows))
+	for n := 0; n < len(flows); n++ {
+		go genFlow(wfq, &flows[n], uint64(n), &wg)
+	}
+
+	go func() {
+		wg.Wait()
+		wfq.Close()
+	}()
+	swg.Done()
+
+	stdDev, err := consumeQueue(wfq, flows)
+
+	if err != nil {
+		t.Fatal(err.Error())
+	}
+
+	if stdDev > 0.1 {
+		for k, d := range flows {
+			t.Logf("For flow %d: Expected %v%%, got %v%%", k, d.idealPercent, d.actualPercent)
+		}
+		t.Fatalf("StdDev was expected to be < 0.1 but got %v", stdDev)
+	}
+}
+
+func TestClose(t *testing.T) {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	wfq := NewQueue(100, 10, &helper{})
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for i := 1; i < 1000; i++ {
+			it := new(item)
+			it.key = 1
+			it.size = uint64(rand.Int63n(10) + 1)
+			it.weight = 1
+			it.seq = uint64(i)
+			ok := wfq.Queue(it)
+			if !ok {
+				break
+			}
+		}
+		wg.Done()
+	}()
+
+	var seq uint64
+	for it, ok := wfq.PeekOrDeQueue(true); ok && seq < 100; it, ok = wfq.PeekOrDeQueue(true) {
+		if seq+1 != it.(*item).seq {
+			t.Fatalf("Item came out of queue out-of-order: expected %d, got %d", seq+1, it.(*item).seq)
+		}
+		seq = it.(*item).seq
+	}
+
+	wfq.Close()
+
+	wg.Wait()
+
+	if wfq.Queue(&item{key: 1, size: 1, weight: 1}) != false {
+		t.Fatal("Queue didn't return false")
 	}
 }

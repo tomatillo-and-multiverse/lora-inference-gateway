@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coocood/freecache"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 
 	"ext-proc/cache"
 	// Add this line to import the package that contains the FetchMetrics function
@@ -80,7 +81,7 @@ func determinePodsWithLora(
 }
 
 // InitializePodUseCaseMetrics initializes the pod model metrics map
-func InitializePodUseCaseMetrics(requestMetrics []cache.PendingRequestActiveAdaptersMetrics, useCase string, loraadapterrequested string) map[string]*cache.PodUseCaseMetrics {
+func InitializePodUseCaseMetrics(requestMetrics []cache.PendingRequestActiveAdaptersMetrics, useCase, loraAdapterRequested string) map[string]*cache.PodUseCaseMetrics {
 	podUseCaseMetricsMap := make(map[string]*cache.PodUseCaseMetrics)
 	for _, metric := range requestMetrics {
 		baseModel := metric.BaseModel
@@ -91,7 +92,7 @@ func InitializePodUseCaseMetrics(requestMetrics []cache.PendingRequestActiveAdap
 		podUseCaseMetricsMap[basekey].GPUKVCacheUsagePerc = metric.GPUKVCacheUsagePerc
 		key := useCase + ":" + metric.PodName
 		if podUseCaseMetricsMap[key] == nil {
-			podUseCaseMetricsMap[key] = &cache.PodUseCaseMetrics{PodName: metric.PodName, UseCase: useCase, ModelName: loraadapterrequested, BaseModel: baseModel}
+			podUseCaseMetricsMap[key] = &cache.PodUseCaseMetrics{PodName: metric.PodName, UseCase: useCase, ModelName: loraAdapterRequested, BaseModel: metric.BaseModel}
 		}
 
 	}
@@ -234,7 +235,7 @@ func determineBasedOnKVCache(
 
 // selectPodWithMinPending selects a pod with the minimum pending requests, randomizing if there are multiple
 func selectPodWithMinPending(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, verbose bool) string {
-	minKVCacheUtilization := 2.0
+	minKVCacheUtilization := 200.0
 	var minPendingPods []string
 	for key, metrics := range podUseCaseMetricsMap {
 		if key != metrics.BaseModel+":"+metrics.PodName {
@@ -283,34 +284,58 @@ func SetPodUseCaseMetrics(cachePodUseCaseMetrics *freecache.Cache, podUseCaseMet
 	return nil
 }
 
-func IsCapacityAvailable(podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics, maxAllowedKVCachePerc float64) bool {
-	for _, podUseCaseMetrics := range podUseCaseMetricsMap {
-
-		if podUseCaseMetrics.ModelName != "" {
+func TotalPendingTokens(lruCacheLLMRequests *expirable.LRU[string, cache.LLMRequest]) int {
+	total_tokens_pending := 0
+	for _, reqID := range lruCacheLLMRequests.Keys() {
+		llmRequest, ok := cache.GetLRUCacheLLMRequest(lruCacheLLMRequests, reqID)
+		if !ok {
 			continue
 		}
-		if podUseCaseMetrics.PseudoGPUKVCacheUsagePerc < maxAllowedKVCachePerc {
-			return true
-		}
+		total_tokens_pending += llmRequest.TokensPending
 	}
-	return false
+	return (total_tokens_pending)
 }
 
-func UpdatePodUseCaseMetrics(requestMetrics []cache.PendingRequestActiveAdaptersMetrics, llmRequest []cache.LLMRequest, cachePodUseCaseMetrics *freecache.Cache, useCase string, loraAdapterRequested string, baseModel string) map[string]*cache.PodUseCaseMetrics {
+func GetPodUseCaseMetrics(pods []string, cachePendingRequestActiveAdapters *freecache.Cache, lruCacheLLMRequests *expirable.LRU[string, cache.LLMRequest], useCase, loraAdapterRequested string, verbose bool) map[string]*cache.PodUseCaseMetrics {
+	var requestMetrics []cache.PendingRequestActiveAdaptersMetrics
+	for _, pod := range pods {
+		requestMetric, err := cache.GetCachePendingRequestActiveAdapters(cachePendingRequestActiveAdapters, pod)
+		if err == nil || err == freecache.ErrNotFound {
+			requestMetrics = append(requestMetrics, *requestMetric)
+		} else if err != freecache.ErrNotFound {
+			log.Printf("Error fetching cachePendingRequestActiveAdapters for pod %s: %v", pod, err)
+			break
+		}
+	}
 	podUseCaseMetricsMap := InitializePodUseCaseMetrics(requestMetrics, useCase, loraAdapterRequested)
-
-	PopulatePodUseCaseMetrics(podUseCaseMetricsMap, llmRequest)
-
-	SetPodUseCaseMetrics(cachePodUseCaseMetrics, podUseCaseMetricsMap)
+	llmRequests := GetLLMRequestsFromLRU(lruCacheLLMRequests, verbose)
+	PopulatePodUseCaseMetrics(podUseCaseMetricsMap, llmRequests)
 
 	return podUseCaseMetricsMap
+}
+
+func GetLLMRequestsFromLRU(lruCacheLLMRequests *expirable.LRU[string, cache.LLMRequest], verbose bool) []cache.LLMRequest {
+	var llmRequests []cache.LLMRequest
+	for _, reqID := range lruCacheLLMRequests.Keys() {
+		llmRequest, ok := cache.GetLRUCacheLLMRequest(lruCacheLLMRequests, reqID)
+		if ok {
+			llmRequests = append(llmRequests, *llmRequest)
+			if verbose {
+				fmt.Printf("fetched ip for req %s\n", reqID)
+			}
+		} else {
+			if verbose {
+			}
+			log.Printf("[GetLLMRequestsFromLRU] Error fetching llmRequest for %s", reqID)
+		}
+	}
+	return llmRequests
 }
 
 // FindTargetPod finds the target pod based on metrics and requested Lora adapter
 func FindTargetPod(
 	loraMetrics []cache.ActiveLoraModelMetrics,
 	requestMetrics []cache.PendingRequestActiveAdaptersMetrics,
-	llmRequest []cache.LLMRequest,
 	podUseCaseMetricsMap map[string]*cache.PodUseCaseMetrics,
 	loraAdapterRequested string,
 	useCase string,

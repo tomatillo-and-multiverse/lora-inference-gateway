@@ -18,7 +18,6 @@ MIN_SEQ_LEN = 4
 CLIENT_TIMEOUT_SEC = 3 * 60 * 60
 NEW_TEXT_KEY = "\nOutput:\n"
 
-
 @dataclass
 class PodMetrics:
     latencies: List[float] = field(default_factory=list)
@@ -33,18 +32,174 @@ class PodMetrics:
     received_timestamps: List[float] = field(default_factory=list)
     status_code_counts: Dict[int, int] = field(default_factory=lambda: {200: 0, 408: 0, 503: 0, 429: 0, 504: 0}) # Initialize with common HTTP codes
 
-
-
 # Dictionary to store QPS for different use cases
 USE_CASE_QPS: Dict[str, float] = {
-    "high-priority": 5,
+    "high-priority": 40,
     "use-case-1": 40,
 }
+
+QPS = 120
 
 # Initialize a dictionary to store metrics per use case
 use_case_metrics: Dict[str, Dict[str, PodMetrics]] = {
     use_case: {} for use_case in USE_CASE_QPS.keys()
 }
+
+
+def compute_pod_metrics(pod_name: str, metrics: PodMetrics, benchmark_time: float):
+    if metrics.latencies:
+        avg_latency = np.mean(metrics.latencies)
+        p99_latency = np.percentile(metrics.latencies, 99)
+    else:
+        avg_latency, p99_latency = 0, 0
+
+    if metrics.gpu_usages:
+        avg_gpu_utilization = np.mean(metrics.gpu_usages)
+        p99_gpu_utilization = np.percentile(metrics.gpu_usages, 99)
+    else:
+        avg_gpu_utilization, p99_gpu_utilization = 0, 0
+
+    if metrics.run_queue_sizes:
+        avg_run_queue_size = np.mean(metrics.run_queue_sizes)
+        p99_run_queue_size = np.percentile(metrics.run_queue_sizes, 99)
+    else:
+        avg_run_queue_size, p99_run_queue_size = 0, 0
+
+    if metrics.wait_queue_sizes:
+        avg_wait_queue_size = np.mean(metrics.wait_queue_sizes)
+        p99_wait_queue_size = np.percentile(metrics.wait_queue_sizes, 99)
+    else:
+        avg_wait_queue_size, p99_wait_queue_size = 0, 0
+
+    total_output_tokens = metrics.total_completion_tokens
+    output_tokens_per_min = 60 * total_output_tokens / benchmark_time if benchmark_time > 0 else 0
+
+    total_input_tokens = metrics.total_prompt_tokens
+    input_tokens_per_min = 60 * total_input_tokens / benchmark_time if benchmark_time > 0 else 0
+
+    total_tokens = total_input_tokens + total_output_tokens
+    tokens_per_min = 60 * total_tokens / benchmark_time if benchmark_time > 0 else 0
+    
+    print(f"\nMetrics for Pod: {pod_name}")
+    print(f"Avg Latency: {avg_latency:.2f} seconds")
+    print(f"99th Percentile Latency: {p99_latency:.2f} seconds")
+    print(f"Avg GPU Utilization: {avg_gpu_utilization:.2f}%")
+    print(f"99th Percentile GPU Utilization: {p99_gpu_utilization:.2f}%")
+    print(f"Avg Running Queue Size: {avg_run_queue_size:.2f}")
+    print(f"99th Percentile Running Queue Size: {p99_run_queue_size:.2f}")
+    print(f"Avg Waiting Queue Size: {avg_wait_queue_size:.2f}")
+    print(f"99th Percentile Waiting Queue Size: {p99_wait_queue_size:.2f}")
+    print(f"Total Successful Requests: {metrics.number_of_succesful_requests}")
+    print(f"Total Failed Requests: {metrics.number_of_failed_requests}")
+    print(f"Output_tokens/min: {output_tokens_per_min:.2f}")
+    print(f"Input_tokens/min: {input_tokens_per_min:.2f}")
+    print(f"Tokens/min: {tokens_per_min:.2f}")
+
+    # Print the status code counts
+    print("Status Code Counts:")
+    for code, count in metrics.status_code_counts.items():
+        print(f"  {code}: {count}")
+        
+def compute_overall_use_case_metrics(benchmark_time: float):
+    for use_case, metrics_dict in use_case_metrics.items():
+        total_latencies = []
+        total_gpu_usages = []
+        total_run_queue_sizes = []
+        total_wait_queue_sizes = []
+        total_successful_requests = 0
+        total_failed_requests = 0
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        overall_status_code_counts: Dict[int, int] = {}
+
+        for pod_name, metrics in metrics_dict.items():
+            print(f"\n--- Pod-specific Metrics for Use Case: {use_case} ---")
+            compute_pod_metrics(pod_name, metrics, benchmark_time)
+
+            total_latencies.extend(metrics.latencies)
+            total_gpu_usages.extend(metrics.gpu_usages)
+            total_run_queue_sizes.extend(metrics.run_queue_sizes)
+            total_wait_queue_sizes.extend(metrics.wait_queue_sizes)
+            total_successful_requests += metrics.number_of_succesful_requests
+            total_failed_requests += metrics.number_of_failed_requests
+            total_prompt_tokens += metrics.total_prompt_tokens
+            total_completion_tokens += metrics.total_completion_tokens
+
+            # Aggregate status code counts across all pods for the use case
+            for code, count in metrics.status_code_counts.items():
+                if code in overall_status_code_counts:
+                    overall_status_code_counts[code] += count
+                else:
+                    overall_status_code_counts[code] = count
+
+
+            min_sent_timestamps = np.min(metrics.sent_timestamps) if len(metrics.sent_timestamps) > 0 else 0
+            max_received_timestamps = np.max(metrics.received_timestamps) if len(metrics.received_timestamps) > 0 else 0
+            request_received_per_sec  = (max_received_timestamps-min_sent_timestamps)/metrics.number_of_succesful_requests if metrics.number_of_succesful_requests > 0 else 0
+
+        if total_latencies:
+            avg_latency = np.mean(total_latencies)
+            p99_latency = np.percentile(total_latencies, 99)
+        else:
+            avg_latency, p99_latency = 0, 0
+
+        if total_gpu_usages:
+            avg_gpu_utilization = np.mean(total_gpu_usages)
+            p99_gpu_utilization = np.percentile(total_gpu_usages, 99)
+        else:
+            avg_gpu_utilization, p99_gpu_utilization = 0, 0
+
+        if total_run_queue_sizes:
+            avg_run_queue_size = np.mean(total_run_queue_sizes)
+            p99_run_queue_size = np.percentile(total_run_queue_sizes, 99)
+        else:
+            avg_run_queue_size, p99_run_queue_size = 0, 0
+
+        if total_wait_queue_sizes:
+            avg_wait_queue_size = np.mean(total_wait_queue_sizes)
+            p99_wait_queue_size = np.percentile(total_wait_queue_sizes, 99)
+        else:
+            avg_wait_queue_size, p99_wait_queue_size = 0, 0
+
+        total_output_tokens = total_completion_tokens
+        output_tokens_per_min = 60 * total_output_tokens / benchmark_time if benchmark_time > 0 else 0
+
+        total_input_tokens = total_prompt_tokens
+        input_tokens_per_min = 60 * total_input_tokens / benchmark_time if benchmark_time > 0 else 0
+
+        total_tokens = total_input_tokens + total_output_tokens
+        tokens_per_min = 60 * total_tokens / benchmark_time if benchmark_time > 0 else 0
+
+        print(f"\nOverall Metrics for Use Case: {use_case}")
+        print(f"Avg Latency: {avg_latency:.2f} seconds")
+        print(f"99th Percentile Latency: {p99_latency:.2f} seconds")
+        print(f"Avg GPU Utilization: {avg_gpu_utilization:.2f}%")
+        print(f"99th Percentile GPU Utilization: {p99_gpu_utilization:.2f}%")
+        print(f"Avg Running Queue Size: {avg_run_queue_size:.2f}")
+        print(f"99th Percentile Running Queue Size: {p99_run_queue_size:.2f}")
+        print(f"Avg Waiting Queue Size: {avg_wait_queue_size:.2f}")
+        print(f"99th Percentile Waiting Queue Size: {p99_wait_queue_size:.2f}")
+        print(f"Total Successful Requests: {total_successful_requests}")
+        print(f"Total Failed Requests: {total_failed_requests}")
+        print(f"Output_tokens/min: {output_tokens_per_min:.2f}")
+        print(f"Input_tokens/min: {input_tokens_per_min:.2f}")
+        print(f"Tokens/min: {tokens_per_min:.2f}")
+        print(f"Request Received/sec: {request_received_per_sec:.2f}")
+
+        # Print the overall status code counts for the use case
+        print("Overall Status Code Counts:")
+        for code, count in overall_status_code_counts.items():
+            print(f"  {code}: {count}")
+
+
+
+
+async def periodic_print_stats(benchmark_start_time: float):
+    """Periodically print stats every 2 minutes."""
+    while True:
+        await asyncio.sleep(120)  # Sleep for 2 minutes
+        benchmark_time = time.time() - benchmark_start_time
+        compute_overall_use_case_metrics(benchmark_time)
 
 def sample_requests(
     dataset_path: str,
@@ -102,17 +257,16 @@ def sample_requests(
 
 async def get_request(
     input_requests: List[Tuple[str, int, int, str]],
-    request_rate: float,
-    use_case: str,
+    request_rate: float = float("inf"),
 ) -> AsyncGenerator[Tuple[str, int, int, str], None]:
     """Gets request async for a specific use case."""
     input_requests = iter(input_requests)
     for request in input_requests:
         yield request
-
+        request_rate = request_rate
         if request_rate == float("inf"):
             continue
-        interval = np.random.exponential(1 / request_rate)
+        interval = 1 / request_rate
         await asyncio.sleep(interval)
 
 def get_target_pods():
@@ -138,6 +292,7 @@ async def send_request(
     request_start_time = time.time()
     headers = {"Content-Type": "application/json"}
     target_pod = ""
+    print(f"sending usecase: {use_case}")
     if random_pod:
         target_pod = get_target_pods()
         headers["target-pod"] = target_pod
@@ -159,7 +314,7 @@ async def send_request(
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
             try:
-                async with session.post(api_url, headers=headers, json=pload) as response:
+                async with session.post(api_url, headers=headers, json=pload ) as response:
                     status_code = response.status
                     if status_code != 200:
                         error_flag = True
@@ -194,12 +349,14 @@ async def send_request(
     if backend == "vllm" and not error_flag:
         prompt_len = int(output["usage"]["prompt_tokens"])
         output_len = int(output["usage"]["completion_tokens"])
-        request_latency = float(output["usage"]["e2e_latency_in_sec"])
-        REQUEST_LATENCY.append((prompt_len, output_len, request_latency))
+        
 
         gpu_usage = float(headers['gpu_cache_usage_sys']) * 100
         running_queue_size = int(headers['running_queue_size'])
         waiting_queue_size = int(headers['waiting_queue_size'])
+        
+        request_latency = float(request_end_time-request_start_time)
+        REQUEST_LATENCY.append((prompt_len, output_len, request_latency))
 
         pod_metrics.latencies.append(request_latency)
         pod_metrics.gpu_usages.append(gpu_usage)
@@ -214,7 +371,6 @@ async def send_request(
         pod_metrics.number_of_failed_requests += 1
 
     use_case_metrics[use_case][pod_name] = pod_metrics
-        
 
 async def benchmark(
     backend: str,
@@ -226,187 +382,39 @@ async def benchmark(
     top_k: int,
     tokenizer: PreTrainedTokenizerBase,
     sax_model: str,
-    random_pod: bool
+    random_pod: bool,
+    benchmark_start_time: float
 ) -> None:
     """Runs benchmark with asynchronous requests for each use case."""
     tasks: List[asyncio.Task] = []
-    for use_case in USE_CASE_QPS.keys():
-        filtered_requests = [req for req in input_requests if req[3] == use_case]
-        async for request in get_request(filtered_requests, USE_CASE_QPS[use_case], use_case):
-            prompt, prompt_len, output_len, _ = request
-            task = asyncio.create_task(
-                send_request(
-                    backend,
-                    api_url,
-                    prompt,
-                    prompt_len,
-                    output_len,
-                    best_of,
-                    use_beam_search,
-                    top_k,
-                    tokenizer,
-                    sax_model,
-                    use_case,
-                    random_pod
-                )
+    #stats_task = asyncio.create_task(periodic_print_stats(benchmark_start_time))  # Start periodic stats printing
+    async for request in get_request(input_requests, request_rate):
+        prompt, prompt_len, output_len, use_case = request
+        task = asyncio.create_task(
+            send_request(
+                backend,
+                api_url,
+                prompt,
+                prompt_len,
+                output_len,
+                best_of,
+                use_beam_search,
+                top_k,
+                tokenizer,
+                sax_model,
+                use_case,
+                random_pod
             )
-            tasks.append(task)
+        )
+        tasks.append(task)
     await asyncio.gather(*tasks)
-
-def compute_pod_metrics(pod_name: str, metrics: PodMetrics, benchmark_time: float):
-    if metrics.latencies:
-        avg_latency = np.mean(metrics.latencies)
-        p99_latency = np.percentile(metrics.latencies, 99)
-    else:
-        avg_latency, p99_latency = 0, 0
-
-    if metrics.gpu_usages:
-        avg_gpu_utilization = np.mean(metrics.gpu_usages)
-        p99_gpu_utilization = np.percentile(metrics.gpu_usages, 99)
-    else:
-        avg_gpu_utilization, p99_gpu_utilization = 0, 0
-
-    if metrics.run_queue_sizes:
-        avg_run_queue_size = np.mean(metrics.run_queue_sizes)
-        p99_run_queue_size = np.percentile(metrics.run_queue_sizes, 99)
-    else:
-        avg_run_queue_size, p99_run_queue_size = 0, 0
-
-    if metrics.wait_queue_sizes:
-        avg_wait_queue_size = np.mean(metrics.wait_queue_sizes)
-        p99_wait_queue_size = np.percentile(metrics.wait_queue_sizes, 99)
-    else:
-        avg_wait_queue_size, p99_wait_queue_size = 0, 0
-
-    total_output_tokens = metrics.total_completion_tokens
-    output_tokens_per_min = 60 * total_output_tokens / benchmark_time if benchmark_time > 0 else 0
-
-    total_input_tokens = metrics.total_prompt_tokens
-    input_tokens_per_min = 60 * total_input_tokens / benchmark_time if benchmark_time > 0 else 0
-
-    total_tokens = total_input_tokens + total_output_tokens
-    tokens_per_min = 60 * total_tokens / benchmark_time if benchmark_time > 0 else 0
-    
-    print(f"\nMetrics for Pod: {pod_name}")
-    print(f"Avg Latency: {avg_latency:.2f} seconds")
-    print(f"99th Percentile Latency: {p99_latency:.2f} seconds")
-    print(f"Avg GPU Utilization: {avg_gpu_utilization:.2f}%")
-    print(f"99th Percentile GPU Utilization: {p99_gpu_utilization:.2f}%")
-    print(f"Avg Running Queue Size: {avg_run_queue_size:.2f}")
-    print(f"99th Percentile Running Queue Size: {p99_run_queue_size:.2f}")
-    print(f"Avg Waiting Queue Size: {avg_wait_queue_size:.2f}")
-    print(f"99th Percentile Waiting Queue Size: {p99_wait_queue_size:.2f}")
-    print(f"Total Successful Requests: {metrics.number_of_succesful_requests}")
-    print(f"Total Failed Requests: {metrics.number_of_failed_requests}")
-    print(f"Output_tokens/min: {output_tokens_per_min:.2f}")
-    print(f"Input_tokens/min: {input_tokens_per_min:.2f}")
-    print(f"Tokens/min: {tokens_per_min:.2f}")
-
-    # Print the status code counts
-    print("Status Code Counts:")
-    for code, count in metrics.status_code_counts.items():
-        print(f"  {code}: {count}")
-
-
-def compute_overall_use_case_metrics(benchmark_time: float):
-    for use_case, metrics_dict in use_case_metrics.items():
-        total_latencies = []
-        total_gpu_usages = []
-        total_run_queue_sizes = []
-        total_wait_queue_sizes = []
-        total_successful_requests = 0
-        total_failed_requests = 0
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        overall_status_code_counts: Dict[int, int] = {}
-
-        for pod_name, metrics in metrics_dict.items():
-            print(f"\n--- Pod-specific Metrics for Use Case: {use_case} ---")
-            compute_pod_metrics(pod_name, metrics, benchmark_time)
-
-            total_latencies.extend(metrics.latencies)
-            total_gpu_usages.extend(metrics.gpu_usages)
-            total_run_queue_sizes.extend(metrics.run_queue_sizes)
-            total_wait_queue_sizes.extend(metrics.wait_queue_sizes)
-            total_successful_requests += metrics.number_of_succesful_requests
-            total_failed_requests += metrics.number_of_failed_requests
-            total_prompt_tokens += metrics.total_prompt_tokens
-            total_completion_tokens += metrics.total_completion_tokens
-
-            # Aggregate status code counts across all pods for the use case
-            for code, count in metrics.status_code_counts.items():
-                if code in overall_status_code_counts:
-                    overall_status_code_counts[code] += count
-                else:
-                    overall_status_code_counts[code] = count
-
-            sorted_sent_timestamps = sorted(metrics.sent_timestamps)
-            sorted_received_timestamps = sorted(metrics.received_timestamps)
-            inv_request_sent_per_sec =  np.mean([sorted_sent_timestamps[i+1] - sorted_sent_timestamps[i] for i in range(len(sorted_sent_timestamps)-1)] if len(sorted_sent_timestamps) > 1 else 0)
-            inv_request_received_per_sec  = np.mean([sorted_received_timestamps[i+1] - sorted_received_timestamps[i] for i in range(len(sorted_received_timestamps)-1)] if len(sorted_received_timestamps) > 1 else 0)
-
-        if total_latencies:
-            avg_latency = np.mean(total_latencies)
-            p99_latency = np.percentile(total_latencies, 99)
-        else:
-            avg_latency, p99_latency = 0, 0
-
-        if total_gpu_usages:
-            avg_gpu_utilization = np.mean(total_gpu_usages)
-            p99_gpu_utilization = np.percentile(total_gpu_usages, 99)
-        else:
-            avg_gpu_utilization, p99_gpu_utilization = 0, 0
-
-        if total_run_queue_sizes:
-            avg_run_queue_size = np.mean(total_run_queue_sizes)
-            p99_run_queue_size = np.percentile(total_run_queue_sizes, 99)
-        else:
-            avg_run_queue_size, p99_run_queue_size = 0, 0
-
-        if total_wait_queue_sizes:
-            avg_wait_queue_size = np.mean(total_wait_queue_sizes)
-            p99_wait_queue_size = np.percentile(total_wait_queue_sizes, 99)
-        else:
-            avg_wait_queue_size, p99_wait_queue_size = 0, 0
-
-        total_output_tokens = total_completion_tokens
-        output_tokens_per_min = 60 * total_output_tokens / benchmark_time if benchmark_time > 0 else 0
-
-        total_input_tokens = total_prompt_tokens
-        input_tokens_per_min = 60 * total_input_tokens / benchmark_time if benchmark_time > 0 else 0
-
-        total_tokens = total_input_tokens + total_output_tokens
-        tokens_per_min = 60 * total_tokens / benchmark_time if benchmark_time > 0 else 0
-
-        print(f"\nOverall Metrics for Use Case: {use_case}")
-        print(f"Avg Latency: {avg_latency:.2f} seconds")
-        print(f"99th Percentile Latency: {p99_latency:.2f} seconds")
-        print(f"Avg GPU Utilization: {avg_gpu_utilization:.2f}%")
-        print(f"99th Percentile GPU Utilization: {p99_gpu_utilization:.2f}%")
-        print(f"Avg Running Queue Size: {avg_run_queue_size:.2f}")
-        print(f"99th Percentile Running Queue Size: {p99_run_queue_size:.2f}")
-        print(f"Avg Waiting Queue Size: {avg_wait_queue_size:.2f}")
-        print(f"99th Percentile Waiting Queue Size: {p99_wait_queue_size:.2f}")
-        print(f"Total Successful Requests: {total_successful_requests}")
-        print(f"Total Failed Requests: {total_failed_requests}")
-        print(f"Output_tokens/min: {output_tokens_per_min:.2f}")
-        print(f"Input_tokens/min: {input_tokens_per_min:.2f}")
-        print(f"Tokens/min: {tokens_per_min:.2f}")
-        print(f"Request Sent/sec: {1/inv_request_sent_per_sec:.2f}")
-        print(f"Request Received/sec: {1/inv_request_received_per_sec:.2f}")
-
-        # Print the overall status code counts for the use case
-        print("Overall Status Code Counts:")
-        for code, count in overall_status_code_counts.items():
-            print(f"  {code}: {count}")
-
 
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
 
-    api_url = f"http://34.126.139.141:8081/v1/completions/"
+    api_url = f"http://35.240.215.93:8081/v1/completions/"
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code
     )
@@ -431,7 +439,8 @@ def main(args: argparse.Namespace):
             args.top_k,
             tokenizer,
             args.sax_model,
-            args.random_pod
+            args.random_pod,
+            benchmark_start_time
         )
     )
     benchmark_end_time = time.time()

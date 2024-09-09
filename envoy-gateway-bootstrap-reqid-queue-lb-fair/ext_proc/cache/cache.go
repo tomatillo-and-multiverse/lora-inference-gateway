@@ -144,8 +144,7 @@ func SetPodUseCaseMetrics(cache *freecache.Cache, metric PodUseCaseMetrics, cach
 	return nil
 }
 
-func GetPodUseCaseMetrics(cache *freecache.Cache, key string) (*PodUseCaseMetrics, error) {
-	cacheKey := fmt.Sprintf("%s:", key)
+func GetPodUseCaseMetrics(cache *freecache.Cache, cacheKey string) (*PodUseCaseMetrics, error) {
 
 	value, err := cache.Get([]byte(cacheKey))
 	if err != nil {
@@ -178,7 +177,7 @@ func GetLRUCacheLLMRequest(cache *expirable.LRU[string, LLMRequest], reqID strin
 func DeleteLRUCacheLLMRequest(cache *expirable.LRU[string, LLMRequest], reqID string) bool {
 	ok := cache.Remove(reqID)
 	if !ok {
-		fmt.Printf("LLMRequest with ReqID: %s not found in cache\n", reqID)
+		fmt.Printf("[DeleteLRUCacheLLMRequest] LLMRequest with ReqID: %s not found in cache\n", reqID)
 		return false
 	}
 	//fmt.Printf("Deleted LLMRequest with ReqID: %s\n", reqID)
