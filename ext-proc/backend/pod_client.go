@@ -1,4 +1,4 @@
-package metrics
+package backend
 
 import (
 	"fmt"
@@ -7,15 +7,13 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	klog "k8s.io/klog/v2"
-
-	"ext-proc/cache"
 )
 
-type PodMetrics struct {
+type PodMetricsClientImpl struct {
 }
 
-// Fetch fetches metrics from a given pod and sends them to a channel
-func (p *PodMetrics) Fetch(pod cache.Pod) (map[string]*dto.MetricFamily, error) {
+// FetchMetrics fetches metrics from a given pod.
+func (p *PodMetricsClientImpl) FetchMetrics(pod Pod) (map[string]*dto.MetricFamily, error) {
 	url := fmt.Sprintf("http://%s/metrics", pod.Address)
 	resp, err := http.Get(url)
 	if err != nil {

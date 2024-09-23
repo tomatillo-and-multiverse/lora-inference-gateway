@@ -1,0 +1,714 @@
+diff --git a/ext-proc/cache/cache.go b/ext-proc/cache/cache.go
+index b79c7e1..3e5bd5f 100644
+--- a/ext-proc/cache/cache.go
++++ b/ext-proc/cache/cache.go
+@@ -4,35 +4,56 @@ import (
+ 	"encoding/json"
+ 	"fmt"
+ 
++	"ext-proc/backend"
++
+ 	"github.com/coocood/freecache"
+ 	klog "k8s.io/klog/v2"
+ )
+ 
+-type Pod struct {
+-	Namespace string
+-	Name      string
+-	Address   string
++const (
++	cacheExpirationSeconds = 0 // never expire
++)
++
++type Cache interface {
++	Set(pod backend.Pod, modelName string, value any) error
++	// Get(key string) (value any, err error)
++}
++
++// Cacheable can be cached.
++type Cacheable interface {
++	Key() []byte
++}
++
++func New(cache *freecache.Cache) *FreeCache {
++	return &FreeCache{
++		cache: cache,
++	}
+ }
+ 
+-func (p Pod) String() string {
+-	return p.Namespace + "." + p.Name
++// FreeCache uses the freecache pkg to implement the cache.
++type FreeCache struct {
++	cache *freecache.Cache
+ }
+ 
+-type ActiveLoraModelMetrics struct {
+-	Date                    string
+-	Pod                     Pod
+-	ModelName               string
+-	NumberOfPendingRequests int
++func key(pod backend.Pod, modelName string) string {
++	return fmt.Sprintf("%s:%s", pod, modelName)
+ }
+ 
+-type PendingRequestActiveAdaptersMetrics struct {
+-	Date                   string
+-	Pod                    Pod
+-	PendingRequests        int
+-	NumberOfActiveAdapters int
++func (c *FreeCache) Set(pod backend.Pod, modelName string, obj any) error {
++	cacheKey := key(pod, modelName)
++	cacheValue, err := json.Marshal(obj)
++	if err != nil {
++		return fmt.Errorf("error marshaling ActiveLoraModelMetrics for key %s: %v", cacheKey, err)
++	}
++	err = c.cache.Set([]byte(cacheKey), cacheValue, cacheExpirationSeconds)
++	if err != nil {
++		return fmt.Errorf("error setting cache for key %s: %v", cacheKey, err)
++	}
++	klog.V(2).Infof("Set - Key: %v, Value: %v\n", cacheKey, cacheValue)
++	return nil
+ }
+ 
+-func SetCacheActiveLoraModel(cache *freecache.Cache, metric ActiveLoraModelMetrics) error {
++func SetCacheActiveLoraModel(cache *freecache.Cache, metric backend.ActiveLoraModelMetrics) error {
+ 	cacheKey := fmt.Sprintf("%s:%s", metric.Pod, metric.ModelName)
+ 	cacheValue, err := json.Marshal(metric)
+ 	if err != nil {
+@@ -46,7 +67,7 @@ func SetCacheActiveLoraModel(cache *freecache.Cache, metric ActiveLoraModelMetri
+ 	return nil
+ }
+ 
+-func SetCachePendingRequestActiveAdapters(cache *freecache.Cache, metric PendingRequestActiveAdaptersMetrics) error {
++func SetCachePendingRequestActiveAdapters(cache *freecache.Cache, metric backend.PendingRequestActiveAdaptersMetrics) error {
+ 	cacheKey := fmt.Sprintf("%s:", metric.Pod)
+ 	cacheValue, err := json.Marshal(metric)
+ 	if err != nil {
+@@ -60,7 +81,7 @@ func SetCachePendingRequestActiveAdapters(cache *freecache.Cache, metric Pending
+ 	return nil
+ }
+ 
+-func GetCacheActiveLoraModel(cache *freecache.Cache, pod Pod, modelName string) (*ActiveLoraModelMetrics, error) {
++func GetCacheActiveLoraModel(cache *freecache.Cache, pod Pod, modelName string) (*backend.ActiveLoraModelMetrics, error) {
+ 	cacheKey := fmt.Sprintf("%s:%s", pod, modelName)
+ 
+ 	value, err := cache.Get([]byte(cacheKey))
+@@ -76,7 +97,7 @@ func GetCacheActiveLoraModel(cache *freecache.Cache, pod Pod, modelName string)
+ 	return &metric, nil
+ }
+ 
+-func GetCachePendingRequestActiveAdapters(cache *freecache.Cache, pod Pod) (*PendingRequestActiveAdaptersMetrics, error) {
++func GetCachePendingRequestActiveAdapters(cache *freecache.Cache, pod Pod) (*backend.PendingRequestActiveAdaptersMetrics, error) {
+ 	cacheKey := fmt.Sprintf("%s:", pod)
+ 
+ 	value, err := cache.Get([]byte(cacheKey))
+diff --git a/ext-proc/handlers/handlers.go b/ext-proc/handlers/handlers.go
+deleted file mode 100644
+index 440ecae..0000000
+--- a/ext-proc/handlers/handlers.go
++++ /dev/null
+@@ -1,477 +0,0 @@
+-package handlers
+-
+-import (
+-	"encoding/json"
+-	"fmt"
+-	"io"
+-	"math"
+-	"math/rand"
+-	"strconv"
+-	"strings"
+-	"time"
+-
+-	"google.golang.org/grpc/codes"
+-	"google.golang.org/grpc/status"
+-	klog "k8s.io/klog/v2"
+-
+-	"github.com/coocood/freecache"
+-	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+-	filterPb "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
+-	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+-	envoyTypePb "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+-
+-	"ext-proc/cache"
+-	"ext-proc/scheduling"
+-)
+-
+-type Server struct {
+-	Pods                              map[string]*cache.Pod
+-	CacheActiveLoraModel              *freecache.Cache
+-	CachePendingRequestActiveAdapters *freecache.Cache
+-	TokenCache                        *scheduling.TokenCache
+-	EnforceFairness                   bool
+-}
+-
+-func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
+-	klog.V(1).Info("Started process:  -->  ")
+-	ctx := srv.Context()
+-	targetPodIP := ""
+-
+-	for {
+-		select {
+-		case <-ctx.Done():
+-			return ctx.Err()
+-		default:
+-		}
+-
+-		req, err := srv.Recv()
+-		if err == io.EOF {
+-			return nil
+-		}
+-		if err != nil {
+-			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
+-		}
+-
+-		klog.V(1).Info("Got stream:  -->  ")
+-
+-		resp := &extProcPb.ProcessingResponse{}
+-		switch v := req.Request.(type) {
+-		case *extProcPb.ProcessingRequest_RequestHeaders:
+-			resp, targetPodIP = s.HandleRequestHeaders(req, targetPodIP)
+-		case *extProcPb.ProcessingRequest_RequestBody:
+-			resp, targetPodIP, err = s.HandleRequestBody(req, targetPodIP)
+-		case *extProcPb.ProcessingRequest_ResponseHeaders:
+-			resp, targetPodIP = s.HandleResponseHeaders(req, targetPodIP)
+-		default:
+-			klog.Info("Unknown Request type %+v\n", v)
+-		}
+-
+-		if err := srv.Send(resp); err != nil {
+-			klog.Info("send error %v", err)
+-		}
+-	}
+-}
+-
+-func valueExists(m map[string]string, valueToFind string) bool {
+-	for _, value := range m {
+-		if value == valueToFind {
+-			return true
+-		}
+-	}
+-	return false
+-}
+-
+-func (s *Server) HandleRequestBody(req *extProcPb.ProcessingRequest, targetPodIP string) (*extProcPb.ProcessingResponse, string, error) {
+-	var err error
+-	klog.V(2).Infof("--- In RequestBody processing: %v\n", targetPodIP)
+-	var requestBody map[string]interface{}
+-	v := req.Request.(*extProcPb.ProcessingRequest_RequestBody)
+-	if err := json.Unmarshal(v.RequestBody.Body, &requestBody); err != nil {
+-		klog.V(1).Infof("Error unmarshaling request body: %v", err)
+-		return nil, targetPodIP, fmt.Errorf("error unmarshaling request body: %v", err)
+-	}
+-
+-	loraAdapterRequested, ok := requestBody["model"].(string)
+-	if !ok {
+-		klog.V(2).Info("model not found in request body")
+-		return nil, targetPodIP, fmt.Errorf("model not found in request")
+-	}
+-
+-	klog.V(2).Infof("Model requested: %v", loraAdapterRequested)
+-	threshold := 100000
+-	thresholdValue, ok := requestBody["threshold"].(float64)
+-	if ok {
+-		threshold = int(thresholdValue)
+-	}
+-	var targetPod *cache.Pod
+-
+-	if targetPodIP == "" {
+-		// Retrieve metrics from cache
+-		var loraMetrics []cache.ActiveLoraModelMetrics
+-		var requestMetrics []cache.PendingRequestActiveAdaptersMetrics
+-
+-		for _, pod := range s.Pods {
+-			loraMetric, err := cache.GetCacheActiveLoraModel(s.CacheActiveLoraModel, *pod, loraAdapterRequested)
+-			if err == nil {
+-				loraMetrics = append(loraMetrics, *loraMetric)
+-			} else if err != freecache.ErrNotFound {
+-				klog.V(1).Infof("Error fetching cacheActiveLoraModel for pod %s and lora_adapter_requested %s: %v", pod, loraAdapterRequested, err)
+-			}
+-
+-			requestMetric, err := cache.GetCachePendingRequestActiveAdapters(s.CachePendingRequestActiveAdapters, *pod)
+-			if err == nil {
+-				requestMetrics = append(requestMetrics, *requestMetric)
+-			} else if err != freecache.ErrNotFound {
+-				klog.V(1).Infof("Error fetching cachePendingRequestActiveAdapters for pod %s: %v", pod, err)
+-				break
+-			}
+-		}
+-
+-		klog.V(2).Infof("Fetched loraMetrics: %+v\n", loraMetrics)
+-		klog.V(2).Infof("Fetched requestMetrics: %+v\n", requestMetrics)
+-
+-		targetPod, err = findTargetPod(loraMetrics, requestMetrics, loraAdapterRequested, threshold)
+-		if err != nil {
+-			return nil, "", fmt.Errorf("failed to find target pod")
+-		}
+-		targetPodIP = targetPod.Address
+-		klog.V(2).Infof("Selected target pod: %s\n", targetPod)
+-		klog.V(2).Infof("Selected target pod IP: %s\n", targetPodIP)
+-	} else {
+-		targetPod = s.Pods[targetPodIP]
+-		klog.V(2).Infof("Pre-selected target pod: %s\n", targetPod)
+-		klog.V(2).Infof("Pre-selected target pod IP: %s\n", targetPodIP)
+-	}
+-
+-	var resp *extProcPb.ProcessingResponse
+-	if s.EnforceFairness && !s.TokenCache.IsFairRequest(loraAdapterRequested) {
+-		resp = &extProcPb.ProcessingResponse{
+-			Response: &extProcPb.ProcessingResponse_ImmediateResponse{
+-				ImmediateResponse: &extProcPb.ImmediateResponse{
+-					Status: &envoyTypePb.HttpStatus{
+-						Code: envoyTypePb.StatusCode_TooManyRequests,
+-					},
+-				},
+-			},
+-		}
+-	} else if _, ok := s.Pods[targetPodIP]; !ok {
+-		resp = &extProcPb.ProcessingResponse{
+-			Response: &extProcPb.ProcessingResponse_ImmediateResponse{
+-				ImmediateResponse: &extProcPb.ImmediateResponse{
+-					Status: &envoyTypePb.HttpStatus{
+-						Code: envoyTypePb.StatusCode_NotFound,
+-					},
+-				},
+-			},
+-		}
+-	} else {
+-		headers := []*configPb.HeaderValueOption{
+-			{
+-				Header: &configPb.HeaderValue{
+-					Key:      "x-went-into-req-body",
+-					RawValue: []byte("true"),
+-				},
+-			},
+-			{
+-				Header: &configPb.HeaderValue{
+-					Key:      "target-pod",
+-					RawValue: []byte(targetPodIP),
+-				},
+-			},
+-		}
+-
+-		// Print headers
+-		for _, header := range headers {
+-			klog.V(2).Infof("[request_body] Header Key: %s, Header Value: %s\n", header.Header.Key, header.Header.RawValue)
+-		}
+-
+-		resp = &extProcPb.ProcessingResponse{
+-			Response: &extProcPb.ProcessingResponse_RequestBody{
+-				RequestBody: &extProcPb.BodyResponse{
+-					Response: &extProcPb.CommonResponse{
+-						HeaderMutation: &extProcPb.HeaderMutation{
+-							SetHeaders: headers,
+-						},
+-					},
+-				},
+-			},
+-		}
+-	}
+-	return resp, targetPodIP, nil
+-}
+-
+-func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetPodIP string) (*extProcPb.ProcessingResponse, string) {
+-	klog.V(2).Info("--- In ResponseHeaders processing")
+-	r := req.Request
+-	h := r.(*extProcPb.ProcessingRequest_ResponseHeaders)
+-
+-	klog.V(2).Infof("Headers: %+v\n", h)
+-
+-	var loraMetrics []cache.ActiveLoraModelMetrics
+-	var requestMetrics []cache.PendingRequestActiveAdaptersMetrics
+-	var modelNames map[string]int
+-	var totalTokens int
+-	var model string
+-	var err error
+-	currentTime := time.Now().Unix()
+-	pendingQueueSize := -1
+-	podAdapterMap := make(map[cache.Pod]int)
+-	targetPod := s.Pods[targetPodIP]
+-	for _, header := range h.ResponseHeaders.Headers.Headers {
+-		switch header.Key {
+-		case "active_lora_adapters":
+-			err = json.Unmarshal([]byte(header.RawValue), &modelNames)
+-			if err != nil {
+-				klog.V(1).Infof("Error parsing model_names: %v", err)
+-			}
+-		case "pending_queue_size":
+-			var err error
+-			pendingQueueSize, err = strconv.Atoi(string(header.RawValue))
+-			if err != nil {
+-				klog.V(1).Infof("Error converting pending_queue_size: %v", err)
+-			}
+-		case "model":
+-			model = string(header.RawValue)
+-		case "total_tokens":
+-			totalTokens, err = strconv.Atoi(string(header.RawValue))
+-			if err != nil {
+-				klog.V(1).Infof("Error parsing total_tokens: %v", err)
+-			}
+-		}
+-	}
+-	if modelNames != nil {
+-		for modelName, numberOfPendingRequests := range modelNames {
+-			metric := cache.ActiveLoraModelMetrics{
+-				Date:                    time.Now().Format(time.RFC3339),
+-				Pod:                     *targetPod,
+-				ModelName:               modelName,
+-				NumberOfPendingRequests: numberOfPendingRequests,
+-			}
+-			podAdapterMap[metric.Pod]++
+-			loraMetrics = append(loraMetrics, metric)
+-		}
+-		// Update cache with parsed values
+-		for _, metric := range loraMetrics {
+-			if err := cache.SetCacheActiveLoraModel(s.CacheActiveLoraModel, metric); err != nil {
+-				klog.V(1).Infof("Error setting cache in Response Header: %v", err)
+-			}
+-		}
+-	}
+-	if pendingQueueSize >= 0 {
+-		requestMetric := cache.PendingRequestActiveAdaptersMetrics{
+-			Date:                   time.Now().Format(time.RFC3339),
+-			Pod:                    *targetPod,
+-			PendingRequests:        pendingQueueSize,
+-			NumberOfActiveAdapters: podAdapterMap[*targetPod],
+-		}
+-		requestMetrics = append(requestMetrics, requestMetric)
+-		for _, metric := range requestMetrics {
+-			if err := cache.SetCachePendingRequestActiveAdapters(s.CachePendingRequestActiveAdapters, metric); err != nil {
+-				klog.V(1).Infof("Error setting cache in Response Header: %v", err)
+-			}
+-		}
+-	}
+-	klog.V(2).Infof("Model Value: %v", model)
+-	klog.V(2).Infof("Total Tokens: %v", totalTokens)
+-	if "model" != "" {
+-		s.TokenCache.StoreResponseInfo(model, currentTime, totalTokens)
+-	}
+-	s.TokenCache.AdapterMap.Range(func(k, v any) bool {
+-		klog.V(2).Infof("Adapter: %+v Entries: %+v", k, v)
+-		return true
+-	})
+-
+-	resp := &extProcPb.ProcessingResponse{
+-		Response: &extProcPb.ProcessingResponse_ResponseHeaders{
+-			ResponseHeaders: &extProcPb.HeadersResponse{
+-				Response: &extProcPb.CommonResponse{
+-					HeaderMutation: &extProcPb.HeaderMutation{
+-						SetHeaders: []*configPb.HeaderValueOption{
+-							{
+-								Header: &configPb.HeaderValue{
+-									Key:      "x-went-into-resp-headers",
+-									RawValue: []byte("true"),
+-								},
+-							},
+-							{
+-								Header: &configPb.HeaderValue{
+-									Key:      "target-pod",
+-									RawValue: []byte(targetPod.Address),
+-								},
+-							},
+-						},
+-					},
+-				},
+-			},
+-		},
+-	}
+-	return resp, targetPod.Address
+-}
+-
+-func (s *Server) HandleRequestHeaders(req *extProcPb.ProcessingRequest, targetPodIP string) (*extProcPb.ProcessingResponse, string) {
+-	klog.V(2).Info("--- In RequestHeaders processing ...")
+-	r := req.Request
+-	h := r.(*extProcPb.ProcessingRequest_RequestHeaders)
+-
+-	klog.V(2).Infof("Headers: %+v\n", h)
+-	klog.V(2).Infof("EndOfStream: %v\n", h.RequestHeaders.EndOfStream)
+-	for _, n := range h.RequestHeaders.Headers.Headers {
+-		if strings.ToLower(n.Key) == "target-pod" {
+-			targetPodIP = string(n.RawValue)
+-		}
+-	}
+-
+-	var resp *extProcPb.ProcessingResponse
+-	if targetPodIP == "" {
+-		bodyMode := filterPb.ProcessingMode_BUFFERED
+-
+-		resp = &extProcPb.ProcessingResponse{
+-			Response: &extProcPb.ProcessingResponse_RequestHeaders{
+-				RequestHeaders: &extProcPb.HeadersResponse{
+-					Response: &extProcPb.CommonResponse{
+-						HeaderMutation: &extProcPb.HeaderMutation{
+-							SetHeaders: []*configPb.HeaderValueOption{
+-								{
+-									Header: &configPb.HeaderValue{
+-										Key:      "x-went-into-req-headers",
+-										RawValue: []byte("true"),
+-									},
+-								},
+-							},
+-						},
+-						ClearRouteCache: true,
+-					},
+-				},
+-			},
+-			ModeOverride: &filterPb.ProcessingMode{
+-				ResponseHeaderMode: filterPb.ProcessingMode_SEND,
+-				RequestBodyMode:    bodyMode,
+-			},
+-		}
+-	} else {
+-		bodyMode := filterPb.ProcessingMode_NONE
+-
+-		resp = &extProcPb.ProcessingResponse{
+-			Response: &extProcPb.ProcessingResponse_RequestHeaders{
+-				RequestHeaders: &extProcPb.HeadersResponse{
+-					Response: &extProcPb.CommonResponse{
+-						HeaderMutation: &extProcPb.HeaderMutation{
+-							SetHeaders: []*configPb.HeaderValueOption{
+-								{
+-									Header: &configPb.HeaderValue{
+-										Key:      "x-went-into-req-headers",
+-										RawValue: []byte("true"),
+-									},
+-								},
+-								{
+-									Header: &configPb.HeaderValue{
+-										Key:      "target-pod",
+-										RawValue: []byte(targetPodIP),
+-									},
+-								},
+-							},
+-						},
+-						ClearRouteCache: true,
+-					},
+-				},
+-			},
+-			ModeOverride: &filterPb.ProcessingMode{
+-				ResponseHeaderMode: filterPb.ProcessingMode_SEND,
+-				RequestBodyMode:    bodyMode,
+-			},
+-		}
+-	}
+-	// Print final headers being sent
+-	klog.V(2).Info("[request_header]Final headers being sent:")
+-	for _, header := range resp.GetRequestHeaders().GetResponse().GetHeaderMutation().GetSetHeaders() {
+-		klog.V(2).Infof("%s: %s\n", header.GetHeader().Key, header.GetHeader().RawValue)
+-	}
+-	return resp, targetPodIP
+-}
+-
+-// findTargetPod finds the target pod based on metrics and the requested lora adapter
+-func findTargetPod(loraMetrics []cache.ActiveLoraModelMetrics, requestMetrics []cache.PendingRequestActiveAdaptersMetrics, loraAdapterRequested string, threshold int) (*cache.Pod, error) {
+-	var targetPod *cache.Pod
+-	var bestAlternativePod *cache.Pod
+-	minAltRequests := math.MaxInt
+-
+-	klog.V(2).Info("Searching for the best pod...")
+-
+-	// Filter metrics for the requested model
+-	for _, reqMetric := range requestMetrics {
+-		if reqMetric.PendingRequests < minAltRequests {
+-			minAltRequests = reqMetric.PendingRequests
+-			bestAlternativePod = &reqMetric.Pod
+-		}
+-	}
+-
+-	if loraAdapterRequested == "" && bestAlternativePod != nil {
+-		klog.V(2).Infof("Selected the best alternative pod: %s with %d pending requests\n", bestAlternativePod, minAltRequests)
+-		return bestAlternativePod, nil
+-	}
+-
+-	var relevantMetrics []cache.ActiveLoraModelMetrics
+-	for _, metric := range loraMetrics {
+-		if metric.ModelName == loraAdapterRequested {
+-			relevantMetrics = append(relevantMetrics, metric)
+-		}
+-	}
+-
+-	// If no metrics found for the requested model, choose the pod with the least active adapters randomly
+-	if len(relevantMetrics) == 0 {
+-		minActiveAdapters := math.MaxInt
+-		var podsWithLeastAdapters []cache.PendingRequestActiveAdaptersMetrics
+-		for _, reqMetric := range requestMetrics {
+-			if reqMetric.NumberOfActiveAdapters < minActiveAdapters {
+-				minActiveAdapters = reqMetric.NumberOfActiveAdapters
+-				podsWithLeastAdapters = []cache.PendingRequestActiveAdaptersMetrics{}
+-			}
+-			if reqMetric.NumberOfActiveAdapters == minActiveAdapters {
+-				podsWithLeastAdapters = append(podsWithLeastAdapters, reqMetric)
+-			}
+-		}
+-
+-		if len(podsWithLeastAdapters) == 0 {
+-			return nil, fmt.Errorf("no pod with min adapter found")
+-		}
+-		rand.Seed(time.Now().UnixNano())
+-		targetPod = &podsWithLeastAdapters[rand.Intn(len(podsWithLeastAdapters))].Pod
+-		klog.V(2).Infof("Selected pod with the least active adapters: %s\n", targetPod)
+-		return targetPod, nil
+-	}
+-
+-	// Find the pod with the max lora requests among the relevant metrics
+-	maxNumberOfPendingRequests := -1
+-	var bestPods []cache.ActiveLoraModelMetrics
+-	for _, metric := range relevantMetrics {
+-		if metric.ModelName == loraAdapterRequested {
+-			if metric.NumberOfPendingRequests > maxNumberOfPendingRequests {
+-				maxNumberOfPendingRequests = metric.NumberOfPendingRequests
+-				bestPods = []cache.ActiveLoraModelMetrics{}
+-			}
+-			if metric.NumberOfPendingRequests == maxNumberOfPendingRequests {
+-				bestPods = append(bestPods, metric)
+-			}
+-		}
+-	}
+-
+-	if len(bestPods) > 0 {
+-		rand.Seed(time.Now().UnixNano())
+-		targetPod = &bestPods[rand.Intn(len(bestPods))].Pod
+-		klog.V(2).Infof("Selected pod with the highest NumberOfPendingRequests: %s\n", targetPod)
+-	} else {
+-		klog.V(2).Infof("No pods match the requested model: %s\n", loraAdapterRequested)
+-	}
+-
+-	// If the number of active Lora adapters in the selected pod is greater than the threshold, choose the pod with the least requests
+-	if maxNumberOfPendingRequests > threshold && bestAlternativePod != nil {
+-		targetPod = bestAlternativePod
+-		klog.V(2).Infof("Selected pod's active Lora adapters exceed threshold, selecting the best alternative pod: %s with %d pending requests\n", targetPod, minAltRequests)
+-	}
+-
+-	if targetPod == nil {
+-		return nil, fmt.Errorf("No pod found")
+-	}
+-
+-	return targetPod, nil
+-}
+diff --git a/ext-proc/main.go b/ext-proc/main.go
+index ddc53d0..7638f99 100644
+--- a/ext-proc/main.go
++++ b/ext-proc/main.go
+@@ -15,7 +15,6 @@ import (
+ 	"ext-proc/cache"
+ 	"ext-proc/handlers"
+ 	"ext-proc/metrics"
+-	"ext-proc/scheduling"
+ 
+ 	"github.com/coocood/freecache"
+ 	"google.golang.org/grpc"
+@@ -31,16 +30,16 @@ type extProcServer struct{}
+ type server struct{}
+ 
+ var (
+-	port                              int
+-	certPath                          string
+-	enforeFairness                    bool
+-	cacheActiveLoraModel              *freecache.Cache
+-	cachePendingRequestActiveAdapters *freecache.Cache
+-	podNames                          []string
+-	podIPMap                          map[string]string
+-	ipPodMap                          map[string]string
+-	interval                          = 30 * time.Second // Update interval for fetching metrics
+-	TTL                               = int64(7)
++	port       = flag.Int("port", 9002, "gRPC port")
++	certPath   = flag.String("certPath", "", "path to extProcServer certificate and private key")
++	podsFlag   = flag.String("pods", "", "Comma-separated list of pod addresses")
++	podIPsFlag = flag.String("podIPs", "", "Comma-separated list of pod IPs")
++
++	podNames []string
++	podIPMap map[string]string
++	ipPodMap map[string]string
++	interval = 30 * time.Second // Update interval for fetching metrics
++	TTL      = int64(7)
+ )
+ 
+ type healthServer struct{}
+@@ -55,11 +54,6 @@ func (s *healthServer) Watch(in *healthPb.HealthCheckRequest, srv healthPb.Healt
+ }
+ 
+ func main() {
+-	flag.IntVar(&port, "port", 9002, "gRPC port")
+-	flag.StringVar(&certPath, "certPath", "", "path to extProcServer certificate and private key")
+-	enforceFairness := flag.Bool("enable-fairness", false, "flag to enable fairness enforcement over the KV-Cache")
+-	podsFlag := flag.String("pods", "", "Comma-separated list of pod addresses")
+-	podIPsFlag := flag.String("podIPs", "", "Comma-separated list of pod IPs")
+ 	flag.Parse()
+ 
+ 	if *podsFlag == "" || *podIPsFlag == "" {
+@@ -87,12 +81,12 @@ func main() {
+ 	}
+ 
+ 	// cache init
+-	cacheActiveLoraModel = freecache.NewCache(1024)
+-	cachePendingRequestActiveAdapters = freecache.NewCache(1024)
++	cacheActiveLoraModel := cache.New(freecache.NewCache(1024))
++	cachePendingRequestActiveAdapters := cache.New(freecache.NewCache(1024))
+ 	debug.SetGCPercent(20)
+ 
+ 	// Start the periodic metrics fetching in a separate goroutine
+-	fetcher := &metrics.PodMetrics{}
++	fetcher := &metrics.PodMetricsFetcher{}
+ 	store := metrics.NewStore(fetcher, cacheActiveLoraModel, cachePendingRequestActiveAdapters, pods)
+ 	go store.FetchMetricsPeriodically(interval)
+ 
+@@ -107,8 +101,6 @@ func main() {
+ 		Pods:                              ipToPods,
+ 		CacheActiveLoraModel:              cacheActiveLoraModel,
+ 		CachePendingRequestActiveAdapters: cachePendingRequestActiveAdapters,
+-		TokenCache:                        scheduling.CreateNewTokenCache(TTL),
+-		EnforceFairness:                   *enforceFairness,
+ 	})
+ 	healthPb.RegisterHealthServer(s, &healthServer{})
+ 
+diff --git a/ext-proc/metrics/pod.go b/ext-proc/metrics/pod.go
+index 414da61..8ac5ea6 100644
+--- a/ext-proc/metrics/pod.go
++++ b/ext-proc/metrics/pod.go
+@@ -11,11 +11,11 @@ import (
+ 	"ext-proc/cache"
+ )
+ 
+-type PodMetrics struct {
++type PodMetricsFetcher struct {
+ }
+ 
+ // Fetch fetches metrics from a given pod and sends them to a channel
+-func (p *PodMetrics) Fetch(pod cache.Pod) (map[string]*dto.MetricFamily, error) {
++func (p *PodMetricsFetcher) Fetch(pod cache.Pod) (map[string]*dto.MetricFamily, error) {
+ 	url := fmt.Sprintf("http://%s/metrics", pod.Address)
+ 	resp, err := http.Get(url)
+ 	if err != nil {
+diff --git a/ext-proc/metrics/store.go b/ext-proc/metrics/store.go
+index e27df97..b653d28 100644
+--- a/ext-proc/metrics/store.go
++++ b/ext-proc/metrics/store.go
+@@ -5,7 +5,6 @@ import (
+ 	"sync"
+ 	"time"
+ 
+-	"github.com/coocood/freecache"
+ 	dto "github.com/prometheus/client_model/go"
+ 	io_prometheus_client "github.com/prometheus/client_model/go"
+ 	klog "k8s.io/klog/v2"
+@@ -13,7 +12,7 @@ import (
+ 	"ext-proc/cache"
+ )
+ 
+-func NewStore(fetcher Fetcher, modelCache, requestCache *freecache.Cache, pods []cache.Pod) *Store {
++func NewStore(fetcher Fetcher, modelCache, requestCache cache.Cache, pods []cache.Pod) *Store {
+ 	return &Store{
+ 		fetcher:                           fetcher,
+ 		cacheActiveLoraModel:              modelCache,
+@@ -28,8 +27,8 @@ type Fetcher interface {
+ 
+ type Store struct {
+ 	fetcher                           Fetcher
+-	cacheActiveLoraModel              *freecache.Cache
+-	cachePendingRequestActiveAdapters *freecache.Cache
++	cacheActiveLoraModel              cache.Cache
++	cachePendingRequestActiveAdapters cache.Cache
+ 	// TODO: refresh pod dynamically
+ 	pods []cache.Pod
+ }

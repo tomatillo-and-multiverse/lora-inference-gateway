@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"runtime/debug"
 	"time"
 
 	"github.com/bojand/ghz/printer"
 	"github.com/bojand/ghz/runner"
-	"github.com/coocood/freecache"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/jhump/protoreflect/desc"
 	dto "github.com/prometheus/client_model/go"
@@ -20,20 +18,17 @@ import (
 	"google.golang.org/protobuf/proto"
 	klog "k8s.io/klog/v2"
 
-	"ext-proc/cache"
+	"ext-proc/backend"
 	"ext-proc/handlers"
-	"ext-proc/metrics"
 	"ext-proc/scheduling"
 )
 
 var (
-	svrAddr               = flag.String("server_address", "localhost:9002", "Address of the grpc server")
-	numPods               = flag.Int("num_pods", 200, "")
-	numModelsPerPod       = flag.Int("num_models_per_pod", 5, "")
-	localServer           = flag.Bool("local_server", true, "whether to start a local ext proc server")
-	metricRefreshInterval = flag.Duration("metric_refresh_interval", time.Second, "")
-	cacheSize             = flag.Int("cache_size", 100000, "size of the metrics cache")
-	totalRequests         = flag.Int("total_requests", 10000, "number of requests to be sent for load test")
+	svrAddr         = flag.String("server_address", "localhost:9002", "Address of the grpc server")
+	numPods         = flag.Int("num_pods", 200, "")
+	numModelsPerPod = flag.Int("num_models_per_pod", 5, "")
+	localServer     = flag.Bool("local_server", true, "whether to start a local ext proc server")
+	totalRequests   = flag.Int("total_requests", 10000, "number of requests to be sent for load test")
 )
 
 const (
@@ -96,16 +91,8 @@ func generateRequest(mtd *desc.MethodDescriptor, callData *runner.CallData) []by
 
 // startExtProc starts an extProc server with fake pods.
 func startExtProc() {
-	pods, ipToPods, fm := fakePods()
-	// cache init
-	cacheActiveLoraModel := freecache.NewCache(*cacheSize)
-	cachePendingRequestActiveAdapters := freecache.NewCache(*cacheSize)
-	debug.SetGCPercent(20)
-
-	// Start the periodic metrics fetching in a separate goroutine
-	fetcher := &metrics.Fake{Res: fm}
-	store := metrics.NewStore(fetcher, cacheActiveLoraModel, cachePendingRequestActiveAdapters, pods)
-	go store.FetchMetricsPeriodically(*metricRefreshInterval)
+	pods, fm := fakePods()
+	pmc := &backend.FakePodMetricsClient{Res: fm}
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -114,35 +101,29 @@ func startExtProc() {
 
 	s := grpc.NewServer()
 
-	extProcPb.RegisterExternalProcessorServer(s, &handlers.Server{
-		Pods:                              ipToPods,
-		CacheActiveLoraModel:              cacheActiveLoraModel,
-		CachePendingRequestActiveAdapters: cachePendingRequestActiveAdapters,
-		TokenCache:                        scheduling.CreateNewTokenCache(TTL),
-	})
+	pp := backend.NewProvider(pmc, &backend.FakePodLister{Pods: pods})
+	extProcPb.RegisterExternalProcessorServer(s, handlers.NewServer(pp, scheduling.NewScheduler(pp)))
 
 	klog.Infof("Starting gRPC server on port :%v", port)
 	reflection.Register(s)
 	s.Serve(lis)
 }
 
-func fakePods() ([]cache.Pod, map[string]*cache.Pod, map[cache.Pod]map[string]*dto.MetricFamily) {
-	pods := make([]cache.Pod, 0, *numPods)
-	ipToPods := make(map[string]*cache.Pod, *numPods)
-	metrics := make(map[cache.Pod]map[string]*dto.MetricFamily, *numPods)
+func fakePods() (backend.PodSet, map[backend.Pod]map[string]*dto.MetricFamily) {
+	pods := make(backend.PodSet)
+	metrics := make(map[backend.Pod]map[string]*dto.MetricFamily, *numPods)
 	for i := 0; i < *numPods; i++ {
 		address := fmt.Sprintf("address-%v", i)
-		pod := cache.Pod{
+		pod := backend.Pod{
 			Namespace: "default",
 			Name:      fmt.Sprintf("pod-%v", i),
 			Address:   address,
 		}
-		pods = append(pods, pod)
-		ipToPods[address] = &pod
+		pods[pod] = true
 		metrics[pod] = fakeMetrics(i)
 	}
 
-	return pods, ipToPods, metrics
+	return pods, metrics
 }
 
 // fakeMetrics adds numModelsPerPod number of adapters to the pod metrics.
@@ -179,14 +160,28 @@ func fakeMetrics(podNumber int) map[string]*dto.MetricFamily {
 		original := metrics["vllm:info_active_adapters_info"].Metric[0].Label[0].Value
 		metrics["vllm:info_active_adapters_info"].Metric[0].Label[0].Value = ptrString(*original + "," + mn)
 	}
-	metrics["vllm:num_requests_waiting"] = &dto.MetricFamily{
+	metrics[backend.RunningQueueSizeMetricName] = &dto.MetricFamily{
 		Metric: []*dto.Metric{
 			{
 				Gauge: &dto.Gauge{Value: ptrFloat64(0)},
 			},
 		},
 	}
-	metrics["vllm:num_requests_running"] = &dto.MetricFamily{
+	metrics[backend.WaitingQueueSizeMetricName] = &dto.MetricFamily{
+		Metric: []*dto.Metric{
+			{
+				Gauge: &dto.Gauge{Value: ptrFloat64(0)},
+			},
+		},
+	}
+	metrics[backend.KVCacheUsagePercentMetricName] = &dto.MetricFamily{
+		Metric: []*dto.Metric{
+			{
+				Gauge: &dto.Gauge{Value: ptrFloat64(0)},
+			},
+		},
+	}
+	metrics[backend.KvCacheMaxTokenCapacityMetricName] = &dto.MetricFamily{
 		Metric: []*dto.Metric{
 			{
 				Gauge: &dto.Gauge{Value: ptrFloat64(0)},
