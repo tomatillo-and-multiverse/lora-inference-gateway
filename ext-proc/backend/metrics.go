@@ -2,17 +2,18 @@ package backend
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
-	io_prometheus_client "github.com/prometheus/client_model/go"
 	"go.uber.org/multierr"
 	klog "k8s.io/klog/v2"
 )
 
 const (
-	ActiveLoRAAdaptersMetricName = "vllm:active_lora_adapters"
+	ActiveLoRAAdaptersMetricName        = "vllm:info_active_adapters_info"
+	LoRAAdapterPendingRequestMetricName = "vllm:active_lora_adapters"
 	// TODO: Replace these with the num_tokens_running/waiting below once we add those to the fork.
 	RunningQueueSizeMetricName = "vllm:num_requests_running"
 	WaitingQueueSizeMetricName = "vllm:num_requests_waiting"
@@ -24,14 +25,15 @@ const (
 	KvCacheMaxTokenCapacityMetricName = "vllm:gpu_cache_max_token_capacity"
 )
 
-func (p *Provider) refreshMetricsOnce() {
+func (p *Provider) refreshMetricsOnce() error {
 	start := time.Now()
 	defer func() {
 		d := time.Now().Sub(start)
 		// TODO: add a metric instead of logging
-		klog.Infof("Refreshed metrics in %v", d)
+		klog.V(3).Infof("Refreshed metrics in %v", d)
 	}()
 	var wg sync.WaitGroup
+	var errs error
 	processOnePod := func(key, value any) bool {
 		pod := key.(Pod)
 		metrics := value.(*PodMetrics)
@@ -40,12 +42,13 @@ func (p *Provider) refreshMetricsOnce() {
 			defer wg.Done()
 			metricFamilies, err := p.pmc.FetchMetrics(pod)
 			if err != nil {
-				klog.Errorf("failed to parse metrics from %s: %v", pod, err)
+				multierr.Append(errs, fmt.Errorf("failed to parse metrics from %s: %v", pod, err))
 				return
 			}
-			updated, err := promToPodMetrics(metricFamilies, *metrics)
+			updated, err := promToPodMetrics(metricFamilies, metrics)
+			klog.V(3).Infof("Updated metrics for pod %s: %v", pod, updated.Metrics)
 			if err != nil {
-				klog.Errorf("Failed to get all pod metrics updated from prometheus: %v", err)
+				multierr.Append(errs, fmt.Errorf("failed to get all pod metrics updated from prometheus: %v", err))
 			}
 			p.UpdatePodMetrics(pod, updated)
 		}()
@@ -53,64 +56,80 @@ func (p *Provider) refreshMetricsOnce() {
 	}
 	p.podMetrics.Range(processOnePod)
 	wg.Wait()
+	return errs
 }
 
-// promToPodMetrics converts scraped prometheus metrics to internal pod metrics.
+// promToPodMetrics updates internal pod metrics with scraped prometheus metrics.
 // A combined error is returned if errors occur in one or more metric processing.
 // it returns a new PodMetrics pointer which can be used to atomically update the pod metrics map.
-func promToPodMetrics(metricFamilies map[string]*dto.MetricFamily, existing PodMetrics) (*PodMetrics, error) {
+func promToPodMetrics(metricFamilies map[string]*dto.MetricFamily, existing *PodMetrics) (*PodMetrics, error) {
 	var errs error
-	updated := existing
-	runningQueueSize, _, err := getGaugeLatestValue(metricFamilies, RunningQueueSizeMetricName)
+	updated := existing.Clone()
+	runningQueueSize, _, err := getLatestMetric(metricFamilies, RunningQueueSizeMetricName)
 	multierr.Append(errs, err)
 	if err != nil {
-		updated.RunningQueueSize = int(runningQueueSize)
+		updated.RunningQueueSize = int(runningQueueSize.GetCounter().GetValue())
 	}
-	waitingQueueSize, _, err := getGaugeLatestValue(metricFamilies, WaitingQueueSizeMetricName)
+	waitingQueueSize, _, err := getLatestMetric(metricFamilies, WaitingQueueSizeMetricName)
 	multierr.Append(errs, err)
 	if err != nil {
-		updated.WaitingQueueSize = int(waitingQueueSize)
+		updated.WaitingQueueSize = int(waitingQueueSize.GetGauge().GetValue())
 	}
-	cachePercent, _, err := getGaugeLatestValue(metricFamilies, KVCacheUsagePercentMetricName)
+	cachePercent, _, err := getLatestMetric(metricFamilies, KVCacheUsagePercentMetricName)
 	multierr.Append(errs, err)
 	if err != nil {
-		updated.KVCacheUsagePercent = cachePercent
+		updated.KVCacheUsagePercent = cachePercent.GetGauge().GetValue()
 	}
+	/* TODO: uncomment once this is available in vllm.
 	kvCap, _, err := getGaugeLatestValue(metricFamilies, KvCacheMaxTokenCapacityMetricName)
 	multierr.Append(errs, err)
 	if err != nil {
 		updated.KvCacheMaxTokenCapacity = int(kvCap)
 	}
-	return &updated, errs
+	*/
+
+	// Update active loras
+	mf, ok := metricFamilies[ActiveLoRAAdaptersMetricName]
+	if ok {
+		// IMPORTANT: replace the map entries instead of appending to it.
+		updated.CachedModels = make(map[string]int)
+		for _, metric := range mf.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "active_adapters" {
+					if label.GetValue() != "" {
+						adapterList := strings.Split(label.GetValue(), ",")
+						for _, adapter := range adapterList {
+							updated.CachedModels[adapter] = 0
+						}
+					}
+				}
+			}
+		}
+	} else {
+		klog.Warningf("metric family %q not found", ActiveLoRAAdaptersMetricName)
+		multierr.Append(errs, fmt.Errorf("metric family %q not found", ActiveLoRAAdaptersMetricName))
+	}
+
+	return updated, errs
 }
 
-// getGaugeLatestValue gets the latest value of a Gauge type metric.
-func getGaugeLatestValue(metricFamilies map[string]*dto.MetricFamily, metricName string) (float64, time.Time, error) {
+// getLatestMetric gets the latest metric of a family. This should be used to get the latest Gauge metric.
+func getLatestMetric(metricFamilies map[string]*dto.MetricFamily, metricName string) (*dto.Metric, time.Time, error) {
 	mf, ok := metricFamilies[metricName]
 	if !ok {
 		klog.Warningf("metric family %q not found", metricName)
-		return 0, time.Time{}, fmt.Errorf("metric family %q not found", metricName)
+		return nil, time.Time{}, fmt.Errorf("metric family %q not found", metricName)
 	}
 	if len(mf.GetMetric()) == 0 {
-		return 0, time.Time{}, fmt.Errorf("no metrics available for %q", metricName)
+		return nil, time.Time{}, fmt.Errorf("no metrics available for %q", metricName)
 	}
 	var latestTs int64
-	var val float64
+	var latest *dto.Metric
 	for _, m := range mf.GetMetric() {
 		if m.GetTimestampMs() > latestTs {
 			latestTs = m.GetTimestampMs()
-			val = m.GetGauge().GetValue()
+			latest = m
 		}
 	}
-	return val, time.Unix(0, latestTs*1000), nil
-}
-
-// getLabelValue returns the value of a label from a Prometheus metric
-func getLabelValue(m *io_prometheus_client.Metric, label string) string {
-	for _, l := range m.GetLabel() {
-		if l.GetName() == label {
-			return l.GetValue()
-		}
-	}
-	return ""
+	return latest, time.Unix(0, latestTs*1000), nil
 }

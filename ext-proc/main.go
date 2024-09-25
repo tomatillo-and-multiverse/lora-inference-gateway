@@ -28,13 +28,10 @@ type server struct{}
 
 var (
 	port       = flag.Int("port", 9002, "gRPC port")
-	certPath   = flag.String("certPath", "", "path to extProcServer certificate and private key")
 	podIPsFlag = flag.String("podIPs", "", "Comma-separated list of pod IPs")
 
-	podIPMap map[string]string
-	ipPodMap map[string]string
-	interval = 30 * time.Second // Update interval for fetching metrics
-	TTL      = int64(7)
+	refreshPodsInterval    = flag.Duration("refreshPodsInterval", 10*time.Second, "interval to refresh pods")
+	refreshMetricsInterval = flag.Duration("refreshMetricsInterval", 50*time.Millisecond, "interval to refresh metrics")
 )
 
 type healthServer struct{}
@@ -49,6 +46,7 @@ func (s *healthServer) Watch(in *healthPb.HealthCheckRequest, srv healthPb.Healt
 }
 
 func main() {
+	klog.InitFlags(nil)
 	flag.Parse()
 
 	// Parse pod IPs.
@@ -68,7 +66,8 @@ func main() {
 		pods[pod] = true
 	}
 
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	klog.Infof("Listening on %q", fmt.Sprintf(":%d", *port))
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
 		klog.Fatalf("failed to listen: %v", err)
 	}
@@ -76,10 +75,13 @@ func main() {
 	s := grpc.NewServer()
 
 	pp := backend.NewProvider(&backend.PodMetricsClientImpl{}, &backend.FakePodLister{Pods: pods})
+	if err := pp.Init(*refreshPodsInterval, *refreshMetricsInterval); err != nil {
+		klog.Fatalf("failed to initialize: %v", err)
+	}
 	extProcPb.RegisterExternalProcessorServer(s, handlers.NewServer(pp, scheduling.NewScheduler(pp)))
 	healthPb.RegisterHealthServer(s, &healthServer{})
 
-	klog.Infof("Starting gRPC server on port :%v", port)
+	klog.Infof("Starting gRPC server on port :%v", *port)
 
 	// shutdown
 	var gracefulStop = make(chan os.Signal)

@@ -2,10 +2,8 @@ package handlers
 
 import (
 	"io"
-	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
-	"github.com/hashicorp/golang-lru/v2/expirable"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	klog "k8s.io/klog/v2"
@@ -16,25 +14,20 @@ import (
 
 func NewServer(pp PodProvider, scheduler Scheduler) *Server {
 	return &Server{
-		scheduler:       scheduler,
-		podProvider:     pp,
-		requestCtxStore: expirable.NewLRU[string, RequestContext](1024*1024*1024, nil, time.Second*600),
+		scheduler:   scheduler,
+		podProvider: pp,
 	}
 }
 
+// Server implements the Envoy external processing server.
+// https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ext_proc/v3/external_processor.proto
 type Server struct {
 	scheduler   Scheduler
 	podProvider PodProvider
-	// requestCtxStore stores ongoing requests discoverable via request IDs so that request and response
-	// handlers can access shared context.
-	// We use an LRU cache so that stale entries can be cleared automatically.
-	// Size and TTL must be set generously so that it doesn't accidentally expire entries that haven't
-	// finished yet.
-	requestCtxStore *expirable.LRU[string, RequestContext]
 }
 
 type Scheduler interface {
-	Schedule(b *scheduling.LLMRequest) (targetPod *backend.Pod, targetModel string, err error)
+	Schedule(b *scheduling.LLMRequest) (targetPod *backend.Pod, err error)
 }
 
 // PodProvider is an interface to provide set of pods in the backend and information such as metrics.
@@ -44,8 +37,11 @@ type PodProvider interface {
 }
 
 func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
-	klog.V(1).Info("Started process:  -->  ")
+	klog.V(2).Info("Processing")
 	ctx := srv.Context()
+	// Create request context to share states during life time of an HTTP request.
+	// See https://github.com/envoyproxy/envoy/issues/17540.
+	reqCtx := &RequestContext{}
 
 	for {
 		select {
@@ -62,50 +58,37 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
 
-		klog.V(1).Info("Got stream:  -->  ")
-
 		resp := &extProcPb.ProcessingResponse{}
 		switch v := req.Request.(type) {
+		case *extProcPb.ProcessingRequest_RequestHeaders:
+			resp = HandleRequestHeaders(reqCtx, req)
+			klog.V(2).Infof("Request context after HandleRequestHeaders: %v", reqCtx)
 		case *extProcPb.ProcessingRequest_RequestBody:
-			resp, err = s.HandleRequestBody(req)
+			resp, err = s.HandleRequestBody(reqCtx, req)
+			klog.V(2).Infof("Request context after HandleRequestBody: %v", reqCtx)
 		case *extProcPb.ProcessingRequest_ResponseHeaders:
-			resp, err = s.HandleResponseHeaders(req)
+			resp, err = s.HandleResponseHeaders(reqCtx, req)
+			klog.V(2).Infof("Request context after HandleResponseHeaders: %v", reqCtx)
 		default:
 			klog.Infof("Unknown Request type %+v", v)
+			return status.Error(codes.Unknown, "unknown request type")
 		}
 
 		if err != nil {
+			klog.Errorf("failed to process request: %v", err)
 			return status.Errorf(codes.Unknown, "failed to handle request: %v", err)
 		}
 
+		klog.V(2).Infof("response: %v", resp)
 		if err := srv.Send(resp); err != nil {
 			klog.Infof("send error %v", err)
+			return status.Errorf(codes.Unknown, "failed to send response back to Envoy: %v", err)
 		}
 	}
 }
 
-// RequestContext stores context information of a request so that it can be accessible during
-// request and response handling.
+// RequestContext stores context information during the life time of an HTTP request.
 type RequestContext struct {
-	ID        string
 	TargetPod *backend.Pod
 	Model     string
-}
-
-func (s *Server) AddRequestCtx(req RequestContext) {
-	s.requestCtxStore.Add(req.ID, req)
-}
-
-func (s *Server) GetAndRemoveRequestCtx(reqID string) (RequestContext, bool) {
-	rc, found := s.requestCtxStore.Get(reqID)
-	s.requestCtxStore.Remove(reqID)
-	return rc, found
-}
-
-func (s *Server) GetRequestCtx(reqID string) (RequestContext, bool) {
-	return s.requestCtxStore.Get(reqID)
-}
-
-func (s *Server) RemoveRequestCtx(reqID string) {
-	s.requestCtxStore.Remove(reqID)
 }

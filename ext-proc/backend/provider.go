@@ -1,16 +1,12 @@
 package backend
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	klog "k8s.io/klog/v2"
-)
-
-const (
-	refreshPodsInterval    = 10 * time.Second
-	refreshMetricsInterval = 50 * time.Millisecond
 )
 
 func NewProvider(pmc PodMetricsClient, pl PodLister) *Provider {
@@ -19,7 +15,6 @@ func NewProvider(pmc PodMetricsClient, pl PodLister) *Provider {
 		pmc:        pmc,
 		pl:         pl,
 	}
-	go p.init()
 	return p
 }
 
@@ -61,16 +56,22 @@ func (p *Provider) GetPodMetrics(pod Pod) (*PodMetrics, bool) {
 	return nil, false
 }
 
-func (p *Provider) init() {
-	p.refreshPodsOnce()
-	p.refreshMetricsOnce()
+func (p *Provider) Init(refreshPodsInterval, refreshMetricsInterval time.Duration) error {
+	if err := p.refreshPodsOnce(); err != nil {
+		return fmt.Errorf("failed to init pods: %v", err)
+	}
+	if err := p.refreshMetricsOnce(); err != nil {
+		return fmt.Errorf("failed to init metrics: %v", err)
+	}
+
+	klog.V(2).Infof("Initialized pods and metrics: %+v", p.AllPodMetrics())
 
 	// periodically refresh pods
 	go func() {
 		for {
 			time.Sleep(refreshPodsInterval)
 			if err := p.refreshPodsOnce(); err != nil {
-				klog.Errorf("Failed to list pods: %v", err)
+				klog.V(1).Infof("Failed to refresh podslist pods: %v", err)
 			}
 		}
 	}()
@@ -79,9 +80,13 @@ func (p *Provider) init() {
 	go func() {
 		for {
 			time.Sleep(refreshMetricsInterval)
-			p.refreshMetricsOnce()
+			if err := p.refreshMetricsOnce(); err != nil {
+				klog.V(1).Infof("Failed to refresh metrics: %v", err)
+			}
 		}
 	}()
+
+	return nil
 }
 
 // refreshPodsOnce lists pods and updates keys in the podMetrics map.
@@ -95,7 +100,13 @@ func (p *Provider) refreshPodsOnce() error {
 	// add new pod to the map
 	for pod := range pods {
 		if _, ok := p.podMetrics.Load(pod); !ok {
-			p.podMetrics.Store(pod, &PodMetrics{Pod: pod})
+			new := &PodMetrics{
+				Pod: pod,
+				Metrics: Metrics{
+					CachedModels: make(map[string]int),
+				},
+			}
+			p.podMetrics.Store(pod, new)
 		}
 	}
 	// remove pods that don't exist any more.
