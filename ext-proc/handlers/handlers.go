@@ -66,8 +66,14 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 			klog.Info("Unknown Request type %+v\n", v)
 		}
 
+		if err != nil {
+			klog.Errorf("Error processing request: %v", err)
+			return status.Errorf(codes.Unknown, "failed to  process request: %v", err)
+		}
+
 		if err := srv.Send(resp); err != nil {
 			klog.Info("send error %v", err)
+			return status.Errorf(codes.Unknown, "failed to  send response back: %v", err)
 		}
 	}
 }
@@ -132,7 +138,7 @@ func (s *Server) HandleRequestBody(req *extProcPb.ProcessingRequest, targetPodIP
 
 		targetPod, err = findTargetPod(loraMetrics, requestMetrics, loraAdapterRequested, threshold)
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to find target pod")
+			return nil, "", fmt.Errorf("failed to find target pod: %v", err)
 		}
 		targetPodIP = targetPod.Address
 		klog.V(2).Infof("Selected target pod: %s\n", targetPod)
@@ -250,12 +256,14 @@ func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetP
 			podAdapterMap[metric.Pod]++
 			loraMetrics = append(loraMetrics, metric)
 		}
+		klog.V(2).Infof("lora metric: %v", loraMetrics)
+
 		// Update cache with parsed values
-		for _, metric := range loraMetrics {
-			if err := cache.SetCacheActiveLoraModel(s.CacheActiveLoraModel, metric); err != nil {
-				klog.V(1).Infof("Error setting cache in Response Header: %v", err)
-			}
-		}
+		// for _, metric := range loraMetrics {
+		// 	if err := cache.SetCacheActiveLoraModel(s.CacheActiveLoraModel, metric); err != nil {
+		// 		klog.V(1).Infof("Error setting cache in Response Header: %v", err)
+		// 	}
+		// }
 	}
 	if pendingQueueSize >= 0 {
 		requestMetric := cache.PendingRequestActiveAdaptersMetrics{
@@ -265,11 +273,12 @@ func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetP
 			NumberOfActiveAdapters: podAdapterMap[*targetPod],
 		}
 		requestMetrics = append(requestMetrics, requestMetric)
-		for _, metric := range requestMetrics {
-			if err := cache.SetCachePendingRequestActiveAdapters(s.CachePendingRequestActiveAdapters, metric); err != nil {
-				klog.V(1).Infof("Error setting cache in Response Header: %v", err)
-			}
-		}
+		// for _, metric := range requestMetrics {
+		// 	if err := cache.SetCachePendingRequestActiveAdapters(s.CachePendingRequestActiveAdapters, metric); err != nil {
+		// 		klog.V(1).Infof("Error setting cache in Response Header: %v", err)
+		// 	}
+		// }
+		klog.V(2).Infof("request metric: %v", requestMetrics)
 	}
 	klog.V(2).Infof("Model Value: %v", model)
 	klog.V(2).Infof("Total Tokens: %v", totalTokens)

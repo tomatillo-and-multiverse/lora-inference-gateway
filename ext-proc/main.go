@@ -39,7 +39,7 @@ var (
 	podNames                          []string
 	podIPMap                          map[string]string
 	ipPodMap                          map[string]string
-	interval                          = 30 * time.Second // Update interval for fetching metrics
+	interval                          = flag.Duration("refreshMetricsInterval", 1000*time.Millisecond, "")
 	TTL                               = int64(7)
 )
 
@@ -94,7 +94,8 @@ func main() {
 	// Start the periodic metrics fetching in a separate goroutine
 	fetcher := &metrics.PodMetrics{}
 	store := metrics.NewStore(fetcher, cacheActiveLoraModel, cachePendingRequestActiveAdapters, pods)
-	go store.FetchMetricsPeriodically(interval)
+	store.FetchMetricsOnce()
+	go store.FetchMetricsPeriodically(*interval)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {

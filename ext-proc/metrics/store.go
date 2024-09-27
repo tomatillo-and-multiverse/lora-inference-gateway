@@ -138,25 +138,27 @@ func getLabelValue(m *io_prometheus_client.Metric, label string) string {
 // FetchMetricsPeriodically fetches metrics periodically and updates the cache
 func (s *Store) FetchMetricsPeriodically(interval time.Duration) {
 	for {
-		s.cacheActiveLoraModel.Clear()
-		s.cachePendingRequestActiveAdapters.Clear()
-		var wg sync.WaitGroup
-		for _, pod := range s.pods {
-			pod := pod
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				metricFamilies, err := s.fetcher.Fetch(pod)
-				if err != nil {
-					klog.Errorf("failed to parse metrics from %s: %v", pod, err)
-					return
-				}
-
-				s.refreshLoraMetrics(pod, metricFamilies)
-				s.refreshRequestMetrics(pod, metricFamilies)
-			}()
-		}
-		wg.Wait()
 		time.Sleep(interval)
+		s.FetchMetricsOnce()
 	}
+}
+
+func (s *Store) FetchMetricsOnce() {
+	var wg sync.WaitGroup
+	for _, pod := range s.pods {
+		pod := pod
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			metricFamilies, err := s.fetcher.Fetch(pod)
+			if err != nil {
+				klog.Errorf("failed to parse metrics from %s: %v", pod, err)
+				return
+			}
+
+			s.refreshLoraMetrics(pod, metricFamilies)
+			s.refreshRequestMetrics(pod, metricFamilies)
+		}()
+	}
+	wg.Wait()
 }
