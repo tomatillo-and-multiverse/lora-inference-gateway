@@ -259,11 +259,11 @@ func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetP
 		klog.V(2).Infof("lora metric: %v", loraMetrics)
 
 		// Update cache with parsed values
-		// for _, metric := range loraMetrics {
-		// 	if err := cache.SetCacheActiveLoraModel(s.CacheActiveLoraModel, metric); err != nil {
-		// 		klog.V(1).Infof("Error setting cache in Response Header: %v", err)
-		// 	}
-		// }
+		for _, metric := range loraMetrics {
+			if err := cache.SetCacheActiveLoraModel(s.CacheActiveLoraModel, metric); err != nil {
+				klog.V(1).Infof("Error setting cache in Response Header: %v", err)
+			}
+		}
 	}
 	if pendingQueueSize >= 0 {
 		requestMetric := cache.PendingRequestActiveAdaptersMetrics{
@@ -273,11 +273,11 @@ func (s *Server) HandleResponseHeaders(req *extProcPb.ProcessingRequest, targetP
 			NumberOfActiveAdapters: podAdapterMap[*targetPod],
 		}
 		requestMetrics = append(requestMetrics, requestMetric)
-		// for _, metric := range requestMetrics {
-		// 	if err := cache.SetCachePendingRequestActiveAdapters(s.CachePendingRequestActiveAdapters, metric); err != nil {
-		// 		klog.V(1).Infof("Error setting cache in Response Header: %v", err)
-		// 	}
-		// }
+		for _, metric := range requestMetrics {
+			if err := cache.SetCachePendingRequestActiveAdapters(s.CachePendingRequestActiveAdapters, metric); err != nil {
+				klog.V(1).Infof("Error setting cache in Response Header: %v", err)
+			}
+		}
 		klog.V(2).Infof("request metric: %v", requestMetrics)
 	}
 	klog.V(2).Infof("Model Value: %v", model)
