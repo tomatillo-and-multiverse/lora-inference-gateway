@@ -9,7 +9,7 @@ COPY requirements.txt .
 
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
-RUN huggingface-cli login --token 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
+RUN huggingface-cli login --token ******
 # Copy the Python script into the container
 COPY qps-test.py .
 
